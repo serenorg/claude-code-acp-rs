@@ -103,6 +103,22 @@ pub struct NewSessionMeta {
 }
 
 impl NewSessionMeta {
+    /// Create a NewSessionMeta with just the resume option
+    ///
+    /// This is useful for `loadSession` where we want to resume
+    /// from a specific session ID.
+    pub fn with_resume(session_id: &str) -> Self {
+        Self {
+            system_prompt: None,
+            claude_code: Some(ClaudeCodeMeta {
+                options: Some(ClaudeCodeOptions {
+                    resume: Some(session_id.to_string()),
+                }),
+            }),
+            disable_built_in_tools: false,
+        }
+    }
+
     /// Parse from ACP request's `_meta` field
     ///
     /// # Arguments
@@ -226,5 +242,14 @@ mod tests {
         );
         assert!(parsed.get_system_prompt_append().is_none());
         assert!(parsed.get_resume_session_id().is_none());
+    }
+
+    #[test]
+    fn test_new_session_meta_with_resume() {
+        let meta = NewSessionMeta::with_resume("session-abc-123");
+        assert_eq!(meta.get_resume_session_id(), Some("session-abc-123"));
+        assert!(meta.should_resume());
+        assert!(meta.system_prompt.is_none());
+        assert!(!meta.disable_built_in_tools);
     }
 }

@@ -12,11 +12,10 @@ use futures::StreamExt;
 use sacp::link::AgentToClient;
 use sacp::schema::{
     AgentCapabilities, ContentBlock, CurrentModeUpdate, Implementation, InitializeRequest,
-    InitializeResponse, NewSessionRequest, NewSessionResponse,
-    PromptCapabilities, PromptRequest, PromptResponse, SessionId, SessionMode, SessionModeId,
-    SessionModeState, SessionNotification, SessionUpdate,
-    SetSessionModeRequest, SetSessionModeResponse,
-    StopReason, TextContent,
+    InitializeResponse, LoadSessionRequest, LoadSessionResponse, NewSessionRequest,
+    NewSessionResponse, PromptCapabilities, PromptRequest, PromptResponse, SessionId, SessionMode,
+    SessionModeId, SessionModeState, SessionNotification, SessionUpdate, SetSessionModeRequest,
+    SetSessionModeResponse, StopReason, TextContent,
 };
 use sacp::JrConnectionCx;
 
@@ -82,6 +81,57 @@ pub fn handle_new_session(
 
     Ok(NewSessionResponse::new(session_id)
         .modes(mode_state))
+}
+
+/// Handle session/load request
+///
+/// Loads an existing session by resuming it with the given session ID.
+/// Returns available modes and models for the session.
+///
+/// Note: Unlike TS implementation which doesn't support loadSession,
+/// our Rust implementation uses claude-code-agent-sdk's resume functionality
+/// to restore conversation history.
+#[tracing::instrument(skip(request, config, sessions), fields(session_id = %request.session_id.0, cwd = ?request.cwd))]
+pub fn handle_load_session(
+    request: LoadSessionRequest,
+    config: &AgentConfig,
+    sessions: &Arc<SessionManager>,
+) -> Result<LoadSessionResponse, AgentError> {
+    // The session_id in the request is the ID of the session to resume
+    let resume_session_id = request.session_id.0.to_string();
+    let cwd = request.cwd;
+
+    tracing::info!(
+        "Loading session {} from cwd {:?}",
+        resume_session_id,
+        cwd
+    );
+
+    // Create NewSessionMeta with resume option
+    // This tells the underlying SDK to resume from the specified session
+    let meta = NewSessionMeta::with_resume(&resume_session_id);
+
+    // Generate a new session ID for this loaded session
+    // Note: We use the same session ID as the one being loaded
+    // so the client can continue using the same ID
+    let session_id = resume_session_id.clone();
+
+    // Check if session already exists in our manager
+    // If it does, we just return success (session already loaded)
+    if sessions.has_session(&session_id) {
+        tracing::info!("Session {} already exists, returning existing session", session_id);
+    } else {
+        // Create the session with resume option
+        sessions.create_session(session_id.clone(), cwd, config, Some(&meta))?;
+    }
+
+    // Build available modes (same as new session)
+    let available_modes = build_available_modes();
+    let mode_state = SessionModeState::new("default", available_modes);
+
+    tracing::info!("Session {} loaded successfully", session_id);
+
+    Ok(LoadSessionResponse::new().modes(mode_state))
 }
 
 /// Build available permission modes

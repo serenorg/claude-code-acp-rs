@@ -176,15 +176,22 @@ impl Session {
 
         // Apply meta options if provided
         if let Some(meta) = meta {
-            // Set system prompt append if provided
-            if let Some(append) = meta.get_system_prompt_append() {
+            // Set system prompt: replace takes priority over append
+            if let Some(replace) = meta.get_system_prompt_replace() {
+                // Complete replacement of system prompt
+                options.system_prompt = Some(SystemPrompt::Text(replace.to_string()));
+                tracing::info!("Using custom system prompt from meta (replace)");
+            } else if let Some(append) = meta.get_system_prompt_append() {
+                // Append to default claude_code preset
                 let preset = SystemPromptPreset::with_append("claude_code", append);
                 options.system_prompt = Some(SystemPrompt::Preset(preset));
+                tracing::info!("Appending to system prompt from meta");
             }
 
             // Set resume session if provided
             if let Some(resume_id) = meta.get_resume_session_id() {
                 options.resume = Some(resume_id.to_string());
+                tracing::info!("Resuming session: {}", resume_id);
             }
         }
 

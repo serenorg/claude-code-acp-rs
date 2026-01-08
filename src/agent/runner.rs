@@ -6,7 +6,8 @@ use std::sync::Arc;
 
 use sacp::link::AgentToClient;
 use sacp::schema::{
-    CancelNotification, InitializeRequest, NewSessionRequest, PromptRequest, SetSessionModeRequest,
+    CancelNotification, InitializeRequest, LoadSessionRequest, NewSessionRequest, PromptRequest,
+    SetSessionModeRequest,
 };
 use sacp::{ByteStreams, JrConnectionCx, MessageCx};
 use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
@@ -310,6 +311,24 @@ async fn run_acp_server() -> Result<(), sacp::Error> {
                 async move |request: NewSessionRequest, request_cx, _connection_cx| {
                     tracing::debug!("Received session/new request");
                     match handlers::handle_new_session(request, &config, &sessions) {
+                        Ok(response) => request_cx.respond(response),
+                        Err(e) => request_cx.respond_with_error(sacp::util::internal_error(e.to_string())),
+                    }
+                }
+            },
+            sacp::on_receive_request!(),
+        )
+        // Handle session/load request
+        .on_receive_request(
+            {
+                let config = config.clone();
+                let sessions = sessions.clone();
+                async move |request: LoadSessionRequest, request_cx, _connection_cx| {
+                    tracing::debug!(
+                        "Received session/load request for session {}",
+                        request.session_id.0
+                    );
+                    match handlers::handle_load_session(request, &config, &sessions) {
                         Ok(response) => request_cx.respond(response),
                         Err(e) => request_cx.respond_with_error(sacp::util::internal_error(e.to_string())),
                     }
