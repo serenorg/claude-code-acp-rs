@@ -9,12 +9,13 @@
 use std::sync::Arc;
 
 use futures::StreamExt;
+use sacp::link::AgentToClient;
 use sacp::schema::{
     AgentCapabilities, ContentBlock, CurrentModeUpdate, Implementation, InitializeRequest,
-    InitializeResponse, ModelId, ModelInfo, NewSessionRequest, NewSessionResponse,
+    InitializeResponse, NewSessionRequest, NewSessionResponse,
     PromptCapabilities, PromptRequest, PromptResponse, SessionId, SessionMode, SessionModeId,
-    SessionModeState, SessionModelState, SessionNotification, SessionUpdate,
-    SetSessionModeRequest, SetSessionModeResponse, SetSessionModelRequest, SetSessionModelResponse,
+    SessionModeState, SessionNotification, SessionUpdate,
+    SetSessionModeRequest, SetSessionModeResponse,
     StopReason, TextContent,
 };
 use sacp::JrConnectionCx;
@@ -79,14 +80,8 @@ pub fn handle_new_session(
     let available_modes = build_available_modes();
     let mode_state = SessionModeState::new("default", available_modes);
 
-    // Build available models
-    let available_models = build_available_models();
-    let default_model = config.model.clone().unwrap_or_else(|| "default".to_string());
-    let model_state = SessionModelState::new(default_model, available_models);
-
     Ok(NewSessionResponse::new(session_id)
-        .modes(mode_state)
-        .models(model_state))
+        .modes(mode_state))
 }
 
 /// Build available permission modes
@@ -107,51 +102,6 @@ fn build_available_modes() -> Vec<SessionMode> {
     ]
 }
 
-/// Build available models
-///
-/// Returns the list of models available in the agent.
-/// By default, returns a single "default" model (like the official claude-code-acp).
-///
-/// Custom models can be configured via the `ACP_MODELS` environment variable,
-/// with format: `model_id:display_name,model_id2:display_name2`
-///
-/// Example:
-/// ```sh
-/// ACP_MODELS="glm-4:GLM 4,glm-4.7:GLM 4.7"
-/// ```
-fn build_available_models() -> Vec<ModelInfo> {
-    // Check for custom models from environment
-    if let Ok(custom_models) = std::env::var("ACP_MODELS") {
-        let models: Vec<ModelInfo> = custom_models
-            .split(',')
-            .filter_map(|s| {
-                let parts: Vec<&str> = s.trim().splitn(2, ':').collect();
-                if parts.len() == 2 {
-                    Some(ModelInfo::new(
-                        ModelId::new(parts[0].trim()),
-                        parts[1].trim(),
-                    ))
-                } else if !parts.is_empty() && !parts[0].is_empty() {
-                    // Just model ID, use it as display name too
-                    Some(ModelInfo::new(
-                        ModelId::new(parts[0].trim()),
-                        parts[0].trim(),
-                    ))
-                } else {
-                    None
-                }
-            })
-            .collect();
-
-        if !models.is_empty() {
-            return models;
-        }
-    }
-
-    // Default: single "default" model (matches official claude-code-acp behavior)
-    vec![ModelInfo::new(ModelId::new("default"), "Default")]
-}
-
 /// Handle session/prompt request
 ///
 /// Sends the prompt to Claude and streams responses back as notifications.
@@ -160,7 +110,7 @@ pub async fn handle_prompt(
     request: PromptRequest,
     _config: &AgentConfig,
     sessions: &Arc<SessionManager>,
-    connection_cx: JrConnectionCx,
+    connection_cx: JrConnectionCx<AgentToClient>,
 ) -> Result<PromptResponse, AgentError> {
     let session_id = request.session_id.0.as_ref();
     let session = sessions.get_session_or_error(session_id)?;
@@ -239,7 +189,7 @@ pub async fn handle_prompt(
 
 /// Send a notification via the connection context
 fn send_notification(
-    cx: &JrConnectionCx,
+    cx: &JrConnectionCx<AgentToClient>,
     notification: SessionNotification,
 ) -> Result<(), sacp::Error> {
     cx.send_notification(notification)
@@ -252,7 +202,7 @@ fn send_notification(
 pub async fn handle_set_mode(
     request: SetSessionModeRequest,
     sessions: &Arc<SessionManager>,
-    connection_cx: JrConnectionCx,
+    connection_cx: JrConnectionCx<AgentToClient>,
 ) -> Result<SetSessionModeResponse, AgentError> {
     let session_id_str = request.session_id.0.as_ref();
     let session = sessions.get_session_or_error(session_id_str)?;
@@ -283,37 +233,6 @@ pub async fn handle_set_mode(
     );
 
     Ok(SetSessionModeResponse::new())
-}
-
-/// Handle session/setModel request
-///
-/// Sets the model for the session. Note that changing the model mid-session
-/// may require reconnecting the client.
-///
-/// Note: This handler is not yet active because sacp SDK does not implement
-/// JrRequest for SetSessionModelRequest. When sacp adds support, this can be
-/// registered in the handler chain.
-#[allow(dead_code)]
-#[tracing::instrument(skip(request, sessions), fields(session_id = %request.session_id.0, model_id = %request.model_id.0))]
-pub async fn handle_set_model(
-    request: SetSessionModelRequest,
-    sessions: &Arc<SessionManager>,
-) -> Result<SetSessionModelResponse, AgentError> {
-    let session_id = request.session_id.0.as_ref();
-    let session = sessions.get_session_or_error(session_id)?;
-
-    let model_id = request.model_id.0.as_ref();
-
-    // Store the model selection in the session
-    session.set_model(model_id.to_string()).await;
-
-    tracing::info!(
-        "Model changed for session {}: {}",
-        session_id,
-        model_id
-    );
-
-    Ok(SetSessionModelResponse::new())
 }
 
 /// Handle session cancellation

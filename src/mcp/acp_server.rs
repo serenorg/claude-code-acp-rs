@@ -12,9 +12,10 @@ use claude_code_agent_sdk::{
 };
 use futures::future::BoxFuture;
 use futures::FutureExt;
+use sacp::link::AgentToClient;
 use sacp::schema::{
-    SessionId, SessionNotification, SessionUpdate, Terminal, ToolCallContent, ToolCallId,
-    ToolCallStatus, ToolCallUpdate, ToolCallUpdateFields,
+    Meta, SessionId, SessionNotification, SessionUpdate, Terminal, ToolCall, ToolCallContent,
+    ToolCallId, ToolCallStatus, ToolCallUpdate, ToolCallUpdateFields, ToolKind,
 };
 use sacp::JrConnectionCx;
 use serde_json::Value;
@@ -44,7 +45,7 @@ pub struct AcpMcpServer {
     /// Session ID
     session_id: Arc<RwLock<Option<String>>>,
     /// ACP connection for sending notifications
-    connection_cx: Arc<RwLock<Option<JrConnectionCx>>>,
+    connection_cx: Arc<RwLock<Option<JrConnectionCx<AgentToClient>>>>,
     /// Terminal client
     terminal_client: Arc<RwLock<Option<Arc<TerminalClient>>>>,
     /// Background process manager
@@ -91,7 +92,7 @@ impl AcpMcpServer {
     }
 
     /// Set the ACP connection
-    pub async fn set_connection(&self, cx: JrConnectionCx) {
+    pub async fn set_connection(&self, cx: JrConnectionCx<AgentToClient>) {
         let mut guard = self.connection_cx.write().await;
         *guard = Some(cx);
     }
@@ -160,6 +161,45 @@ impl AcpMcpServer {
     }
 
     /// Send a terminal update notification
+    ///
+    /// This is a standalone function that can be called from spawned tasks.
+    /// Note: This function is kept for potential future use with Terminal API.
+    #[allow(dead_code)]
+    fn send_terminal_update_with_cx(
+        cx: &JrConnectionCx<AgentToClient>,
+        session_id: &str,
+        tool_use_id: &str,
+        terminal_id: &str,
+        status: ToolCallStatus,
+        title: Option<&str>,
+    ) -> Result<(), String> {
+        // Build terminal content
+        let terminal = Terminal::new(terminal_id.to_string());
+        let content = vec![ToolCallContent::Terminal(terminal)];
+
+        // Build update fields
+        let mut update_fields = ToolCallUpdateFields::new()
+            .status(status)
+            .content(content);
+
+        if let Some(title) = title {
+            update_fields = update_fields.title(title);
+        }
+
+        // Build and send notification
+        let tool_call_id = ToolCallId::new(tool_use_id.to_string());
+        let update = ToolCallUpdate::new(tool_call_id, update_fields);
+        let notification = SessionNotification::new(
+            SessionId::new(session_id),
+            SessionUpdate::ToolCallUpdate(update),
+        );
+
+        cx.send_notification(notification)
+            .map_err(|e| format!("Failed to send notification: {}", e))
+    }
+
+    /// Send a terminal update notification (instance method)
+    #[allow(dead_code)]
     async fn send_terminal_update(
         &self,
         tool_use_id: &str,
@@ -197,6 +237,96 @@ impl AcpMcpServer {
         let notification = SessionNotification::new(
             SessionId::new(session_id.as_str()),
             SessionUpdate::ToolCallUpdate(update),
+        );
+
+        cx.send_notification(notification)
+            .map_err(|e| format!("Failed to send notification: {}", e))
+    }
+
+    /// Send a ToolCallUpdate notification with meta field
+    ///
+    /// This is used to send terminal info via the _meta field instead of Terminal API.
+    fn send_tool_call_update_with_meta(
+        cx: &JrConnectionCx<AgentToClient>,
+        session_id: &str,
+        tool_use_id: &str,
+        status: Option<ToolCallStatus>,
+        title: Option<&str>,
+        meta: Option<Meta>,
+    ) -> Result<(), String> {
+        // Build update fields
+        let mut update_fields = ToolCallUpdateFields::new();
+
+        if let Some(status) = status {
+            update_fields = update_fields.status(status);
+        }
+
+        if let Some(title) = title {
+            update_fields = update_fields.title(title);
+        }
+
+        // Build and send notification
+        let tool_call_id = ToolCallId::new(tool_use_id.to_string());
+        let mut update = ToolCallUpdate::new(tool_call_id, update_fields);
+
+        // Add meta if provided
+        if let Some(meta) = meta {
+            update = update.meta(meta);
+        }
+
+        let notification = SessionNotification::new(
+            SessionId::new(session_id),
+            SessionUpdate::ToolCallUpdate(update),
+        );
+
+        cx.send_notification(notification)
+            .map_err(|e| format!("Failed to send notification: {}", e))
+    }
+
+    /// Convert serde_json::Value to Meta (Map<String, Value>)
+    fn value_to_meta(value: serde_json::Value) -> Option<Meta> {
+        match value {
+            serde_json::Value::Object(map) => Some(map),
+            _ => None,
+        }
+    }
+
+    /// Send a ToolCall notification with meta field and terminal content
+    ///
+    /// IMPORTANT: This sends a ToolCall (not ToolCallUpdate) notification.
+    /// Zed handles terminal in two ways:
+    /// 1. meta.terminal_info - creates and registers the terminal
+    /// 2. content[].Terminal - associates the terminal with the tool call UI
+    /// Both are needed for terminal output to be displayed correctly.
+    fn send_tool_call_with_meta(
+        cx: &JrConnectionCx<AgentToClient>,
+        session_id: &str,
+        tool_use_id: &str,
+        title: Option<&str>,
+        status: ToolCallStatus,
+        terminal_id: Option<&str>,
+        meta: Option<Meta>,
+    ) -> Result<(), String> {
+        let tool_call_id = ToolCallId::new(tool_use_id.to_string());
+
+        let mut tool_call = ToolCall::new(tool_call_id, title.unwrap_or("Running command"))
+            .kind(ToolKind::Execute)
+            .status(status);
+
+        // Add terminal content to associate terminal with tool call UI
+        if let Some(tid) = terminal_id {
+            let terminal = Terminal::new(tid.to_string());
+            tool_call = tool_call.content(vec![ToolCallContent::Terminal(terminal)]);
+        }
+
+        // Add meta if provided (contains terminal_info for creating the terminal)
+        if let Some(meta) = meta {
+            tool_call = tool_call.meta(meta);
+        }
+
+        let notification = SessionNotification::new(
+            SessionId::new(session_id),
+            SessionUpdate::ToolCall(tool_call),
         );
 
         cx.send_notification(notification)
@@ -259,7 +389,16 @@ impl AcpMcpServer {
         Ok(result)
     }
 
-    /// Execute Bash tool with Terminal API integration
+    /// Execute Bash tool with streaming output via meta field
+    ///
+    /// This implementation bypasses the Terminal API (which causes dispatch loop deadlock)
+    /// and instead executes commands directly, sending terminal-like updates via the
+    /// _meta field in ToolCallUpdate notifications.
+    ///
+    /// Zed supports these meta fields:
+    /// - terminal_info: { terminal_id, cwd } - sent at start
+    /// - terminal_output: { terminal_id, data } - sent for each output chunk
+    /// - terminal_exit: { terminal_id, exit_code } - sent when command completes
     #[tracing::instrument(skip(self, arguments, context), fields(tool_use_id = ?tool_use_id))]
     async fn execute_bash_tool(
         &self,
@@ -267,122 +406,314 @@ impl AcpMcpServer {
         tool_use_id: Option<&str>,
         context: &ToolContext,
     ) -> Result<ToolResult, String> {
-        let terminal_client = self.terminal_client.read().await;
-        let has_terminal_client = terminal_client.is_some();
-        tracing::debug!("Terminal client available: {}", has_terminal_client);
+        let connection_cx = self.connection_cx.read().await;
+        let session_id_guard = self.session_id.read().await;
 
-        // If terminal client is available and we have a tool_use_id, use Terminal API
-        if let (Some(client), Some(tool_use_id)) = (terminal_client.as_ref(), tool_use_id) {
-            let command = arguments
-                .get("command")
-                .and_then(|v| v.as_str())
-                .ok_or("Missing command")?;
-            let description = arguments.get("description").and_then(|v| v.as_str());
-            let run_in_background = arguments
-                .get("run_in_background")
-                .and_then(|v| v.as_bool())
-                .unwrap_or(false);
-            let timeout_ms = arguments
-                .get("timeout")
-                .and_then(|v| v.as_u64())
-                .unwrap_or(120_000);
+        // Extract command parameters
+        let command = arguments
+            .get("command")
+            .and_then(|v| v.as_str())
+            .ok_or("Missing command")?
+            .to_string();
+        let description = arguments
+            .get("description")
+            .and_then(|v| v.as_str())
+            .map(String::from);
+        let run_in_background = arguments
+            .get("run_in_background")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        let timeout_ms = arguments
+            .get("timeout")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(120_000)
+            .min(600_000); // Max 10 minutes
 
-            tracing::info!(command = %command, "Creating terminal for Bash command");
+        // Generate unique terminal ID for tracking
+        let terminal_id = uuid::Uuid::new_v4().to_string();
 
-            // Create terminal
-            let terminal_id = client
-                .create(
-                    "bash",
-                    vec!["-c".to_string(), command.to_string()],
-                    Some(context.cwd.clone()),
-                    Some(32_000),
-                )
-                .await
-                .map_err(|e| format!("Failed to create terminal: {}", e))?;
+        // Title is the actual command (no truncation, let UI handle display)
+        let title = command.clone();
 
-            tracing::info!(terminal_id = %terminal_id.0, "Terminal created, sending update");
+        tracing::info!(
+            command = %command,
+            description = ?description,
+            terminal_id = %terminal_id,
+            run_in_background = run_in_background,
+            "Executing Bash command with streaming output"
+        );
 
-            // Send terminal update immediately
-            if let Err(e) = self
-                .send_terminal_update(
-                    tool_use_id,
-                    terminal_id.0.as_ref(),
-                    ToolCallStatus::InProgress,
-                    description,
-                )
-                .await
-            {
-                tracing::warn!("Failed to send terminal update: {}", e);
+        // Send terminal_info notification at start (if we have connection)
+        // IMPORTANT: Use ToolCall (not ToolCallUpdate) notification because Zed
+        // only creates terminals when terminal_info is in a ToolCall notification.
+        if let (Some(cx), Some(session_id), Some(tool_use_id)) =
+            (connection_cx.as_ref(), session_id_guard.as_ref(), tool_use_id)
+        {
+            // Build meta with terminal_info and optional description for future use
+            let mut meta_json = serde_json::json!({
+                "terminal_info": {
+                    "terminal_id": &terminal_id,
+                    "cwd": context.cwd.display().to_string()
+                }
+            });
+            // Add description to meta if available (for future use by clients)
+            if let Some(ref desc) = description {
+                meta_json["description"] = serde_json::json!(desc);
             }
-
-            // Handle background vs foreground execution
-            if run_in_background {
-                tracing::info!("Running command in background");
-                let shell_id = format!("term-{}", terminal_id.0.as_ref());
-                return Ok(ToolResult::success(format!(
-                    "Command started in background.\n\nShell ID: {}\n\nUse BashOutput to check status.",
-                    shell_id
-                )));
+            let meta = Self::value_to_meta(meta_json);
+            if let Err(e) = Self::send_tool_call_with_meta(
+                cx,
+                session_id,
+                tool_use_id,
+                Some(&title),
+                ToolCallStatus::InProgress,
+                Some(&terminal_id),  // Pass terminal_id for content association
+                meta,
+            ) {
+                tracing::debug!("Failed to send terminal_info: {}", e);
             }
+        }
 
-            tracing::debug!("Waiting for command to complete (timeout: {}ms)", timeout_ms);
+        // Drop locks before executing command
+        let cx_clone = connection_cx.as_ref().cloned();
+        let session_id_clone = session_id_guard.clone();
+        let tool_use_id_clone = tool_use_id.map(String::from);
+        drop(connection_cx);
+        drop(session_id_guard);
 
-            // Wait for command to complete
-            let timeout_duration = std::time::Duration::from_millis(timeout_ms);
-            let exit_result = tokio::time::timeout(
-                timeout_duration,
-                client.wait_for_exit(terminal_id.clone()),
+        // Execute command with streaming
+        let result = self
+            .execute_command_with_streaming(
+                &command,
+                &terminal_id,
+                context,
+                timeout_ms,
+                run_in_background,
+                cx_clone.as_ref(),
+                session_id_clone.as_deref(),
+                tool_use_id_clone.as_deref(),
             )
             .await;
 
-            // Get output
-            let output = match client.output(terminal_id.clone()).await {
-                Ok(resp) => resp.output,
-                Err(e) => format!("(failed to get output: {})", e),
+        // Send terminal_exit notification
+        if let (Some(cx), Some(session_id), Some(tool_use_id)) =
+            (cx_clone.as_ref(), session_id_clone.as_ref(), tool_use_id_clone.as_ref())
+        {
+            let exit_code = match &result {
+                Ok(r) if !r.is_error => 0,
+                _ => 1,
             };
+            let meta = Self::value_to_meta(serde_json::json!({
+                "terminal_exit": {
+                    "terminal_id": &terminal_id,
+                    "exit_code": exit_code
+                }
+            }));
+            if let Err(e) = Self::send_tool_call_update_with_meta(
+                cx,
+                session_id,
+                tool_use_id,
+                Some(ToolCallStatus::Completed),
+                None,
+                meta,
+            ) {
+                tracing::debug!("Failed to send terminal_exit: {}", e);
+            }
+        }
 
-            // Release terminal
-            drop(client.release(terminal_id).await);
+        result
+    }
 
-            // Process result
-            match exit_result {
-                Ok(Ok(exit_response)) => {
-                    let exit_status = exit_response.exit_status;
-                    #[allow(clippy::cast_possible_wrap)]
-                    let exit_code = exit_status.exit_code.map(|c| c as i32).unwrap_or(-1);
-                    tracing::info!(exit_code = exit_code, "Command completed");
+    /// Execute command with streaming output via meta field
+    ///
+    /// This function executes the command directly using tokio::process::Command
+    /// and sends output chunks via ToolCallUpdate notifications with terminal_output meta.
+    #[allow(clippy::too_many_arguments)]
+    async fn execute_command_with_streaming(
+        &self,
+        command: &str,
+        terminal_id: &str,
+        context: &ToolContext,
+        timeout_ms: u64,
+        run_in_background: bool,
+        cx: Option<&JrConnectionCx<AgentToClient>>,
+        session_id: Option<&str>,
+        tool_use_id: Option<&str>,
+    ) -> Result<ToolResult, String> {
+        use tokio::io::{AsyncBufReadExt, BufReader};
+        use tokio::process::Command;
 
-                    if exit_code == 0 {
-                        Ok(ToolResult::success(output))
-                    } else {
-                        Ok(ToolResult::error(format!(
-                            "Command failed with exit code {}\n{}",
-                            exit_code, output
-                        )))
+        // Spawn the command
+        let mut child = Command::new("bash")
+            .arg("-c")
+            .arg(command)
+            .current_dir(&context.cwd)
+            .env("CLAUDECODE", "1")
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .map_err(|e| format!("Failed to spawn command: {}", e))?;
+
+        // Handle background execution
+        if run_in_background {
+            let shell_id = format!("term-{}", terminal_id);
+            tracing::info!(shell_id = %shell_id, "Command started in background");
+            return Ok(ToolResult::success(format!(
+                "Command started in background.\n\nShell ID: {}\n\nUse BashOutput to check status.",
+                shell_id
+            )));
+        }
+
+        // Collect output
+        let mut output = String::new();
+        let mut stderr_output = String::new();
+
+        // Take stdout and stderr
+        let stdout = child.stdout.take();
+        let stderr = child.stderr.take();
+
+        // Read stdout in a task
+        let stdout_task = if let Some(stdout) = stdout {
+            let cx = cx.cloned();
+            let session_id = session_id.map(String::from);
+            let tool_use_id = tool_use_id.map(String::from);
+            let terminal_id = terminal_id.to_string();
+
+            Some(tokio::spawn(async move {
+                let reader = BufReader::new(stdout);
+                let mut lines = reader.lines();
+                let mut collected = String::new();
+
+                while let Ok(Some(line)) = lines.next_line().await {
+                    collected.push_str(&line);
+                    collected.push('\n');
+
+                    // Send terminal_output notification
+                    if let (Some(cx), Some(session_id), Some(tool_use_id)) =
+                        (cx.as_ref(), session_id.as_ref(), tool_use_id.as_ref())
+                    {
+                        let meta = Self::value_to_meta(serde_json::json!({
+                            "terminal_output": {
+                                "terminal_id": &terminal_id,
+                                "data": format!("{}\n", line)
+                            }
+                        }));
+                        drop(Self::send_tool_call_update_with_meta(
+                            cx,
+                            session_id,
+                            tool_use_id,
+                            None,
+                            None,
+                            meta,
+                        ));
                     }
                 }
-                Ok(Err(e)) => {
-                    tracing::error!("Terminal execution failed: {}", e);
-                    Ok(ToolResult::error(format!("Terminal execution failed: {}", e)))
+                collected
+            }))
+        } else {
+            None
+        };
+
+        // Read stderr in a task
+        let stderr_task = if let Some(stderr) = stderr {
+            Some(tokio::spawn(async move {
+                let reader = BufReader::new(stderr);
+                let mut lines = reader.lines();
+                let mut collected = String::new();
+
+                while let Ok(Some(line)) = lines.next_line().await {
+                    collected.push_str(&line);
+                    collected.push('\n');
                 }
-                Err(_) => {
-                    tracing::warn!("Command timed out after {}ms", timeout_ms);
+                collected
+            }))
+        } else {
+            None
+        };
+
+        // Wait for command with timeout
+        let timeout_duration = std::time::Duration::from_millis(timeout_ms);
+        let wait_result = tokio::time::timeout(timeout_duration, child.wait()).await;
+
+        // Collect outputs
+        if let Some(task) = stdout_task {
+            if let Ok(out) = task.await {
+                output = out;
+            }
+        }
+        if let Some(task) = stderr_task {
+            if let Ok(err) = task.await {
+                stderr_output = err;
+            }
+        }
+
+        // Combine output
+        let combined_output = if stderr_output.is_empty() {
+            output
+        } else if output.is_empty() {
+            stderr_output
+        } else {
+            format!("{}\n--- stderr ---\n{}", output, stderr_output)
+        };
+
+        // Process result
+        match wait_result {
+            Ok(Ok(status)) => {
+                let exit_code = status.code().unwrap_or(-1);
+                tracing::info!(exit_code = exit_code, command = %command, "Command completed");
+
+                if status.success() {
+                    Ok(ToolResult::success(combined_output))
+                } else {
                     Ok(ToolResult::error(format!(
-                        "Command timed out after {}ms\n{}",
-                        timeout_ms, output
+                        "Command failed with exit code {}\n{}",
+                        exit_code, combined_output
                     )))
                 }
             }
-        } else {
-            // Fall back to direct execution
-            tracing::info!("Falling back to direct execution (no terminal client or tool_use_id)");
-            let result = self
-                .mcp_server
-                .execute("Bash", arguments, context)
-                .await;
-            tracing::info!("Direct execution completed, is_error: {}", result.is_error);
-            Ok(result)
+            Ok(Err(e)) => {
+                tracing::error!(error = %e, "Failed to wait for command");
+                Ok(ToolResult::error(format!(
+                    "Failed to wait for command: {}\n{}",
+                    e, combined_output
+                )))
+            }
+            Err(_) => {
+                tracing::warn!(timeout_ms = timeout_ms, "Command timed out");
+                // Try to kill the process
+                drop(child.kill().await);
+                Ok(ToolResult::error(format!(
+                    "Command timed out after {}ms\n{}",
+                    timeout_ms, combined_output
+                )))
+            }
         }
+    }
+
+    /// Execute Bash command via direct execution (legacy fallback)
+    ///
+    /// This is kept for compatibility but the new execute_bash_tool
+    /// already uses direct execution with streaming.
+    #[allow(dead_code)]
+    async fn execute_bash_fallback(
+        &self,
+        arguments: Value,
+        context: &ToolContext,
+    ) -> Result<ToolResult, String> {
+        tracing::info!("Executing Bash via direct fallback");
+
+        // Create a new context WITHOUT terminal_client to force direct execution
+        let fallback_context = ToolContext::new(
+            context.session_id.clone(),
+            context.cwd.clone(),
+        );
+
+        let result = self
+            .mcp_server
+            .execute("Bash", arguments, &fallback_context)
+            .await;
+        tracing::info!("Direct execution completed, is_error: {}", result.is_error);
+        Ok(result)
     }
 }
 
@@ -491,7 +822,7 @@ impl SdkMcpServer for AcpMcpServer {
                         "type": "text",
                         "text": result.content
                     }],
-                    "isError": result.is_error
+                    "is_error": result.is_error
                 }))
             }
             // MCP notifications - these don't expect a response but we return empty success
@@ -609,5 +940,320 @@ mod tests {
     fn test_acp_tool_prefix_constant() {
         // Verify the SDK constant is correct
         assert_eq!(ACP_TOOL_PREFIX, "mcp__acp__");
+    }
+
+    // ============================================================
+    // MCP handle_message tests
+    // ============================================================
+
+    #[tokio::test]
+    async fn test_handle_message_initialize() {
+        let server = AcpMcpServer::new("test-server", "1.0.0");
+
+        let request = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {
+                "protocolVersion": "2024-11-05",
+                "capabilities": {},
+                "clientInfo": {
+                    "name": "test-client",
+                    "version": "1.0.0"
+                }
+            }
+        });
+
+        let result = server.handle_message(request).await;
+        assert!(result.is_ok(), "initialize should succeed");
+
+        let response = result.unwrap();
+        assert_eq!(response["protocolVersion"], "2024-11-05");
+        assert!(response["capabilities"]["tools"].is_object());
+        assert_eq!(response["serverInfo"]["name"], "test-server");
+        assert_eq!(response["serverInfo"]["version"], "1.0.0");
+    }
+
+    #[tokio::test]
+    async fn test_handle_message_tools_list() {
+        let server = AcpMcpServer::new("test-server", "1.0.0");
+
+        let request = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "tools/list",
+            "params": {}
+        });
+
+        let result = server.handle_message(request).await;
+        assert!(result.is_ok(), "tools/list should succeed");
+
+        let response = result.unwrap();
+        let tools = response["tools"].as_array().unwrap();
+        assert!(!tools.is_empty(), "Should have tools");
+
+        // Check that Bash tool is present
+        let bash_tool = tools.iter().find(|t| t["name"] == "Bash");
+        assert!(bash_tool.is_some(), "Bash tool should be present");
+
+        // Check tool structure
+        let bash = bash_tool.unwrap();
+        assert!(bash["description"].is_string());
+        assert!(bash["inputSchema"].is_object());
+    }
+
+    #[tokio::test]
+    async fn test_handle_message_tools_call_bash_fallback() {
+        // Test Bash tool execution WITHOUT terminal client (fallback to direct execution)
+        let server = AcpMcpServer::new("test-server", "1.0.0");
+
+        // Set a valid cwd for the test
+        server.set_cwd(std::env::temp_dir()).await;
+        server.set_session_id("test-session").await;
+
+        let request = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 3,
+            "method": "tools/call",
+            "params": {
+                "name": "Bash",
+                "arguments": {
+                    "command": "echo hello"
+                }
+            }
+        });
+
+        let result = server.handle_message(request).await;
+        assert!(result.is_ok(), "tools/call should succeed: {:?}", result.err());
+
+        let response = result.unwrap();
+
+        // Check response structure matches MCP tool result format
+        assert!(response["content"].is_array(), "Response should have content array");
+        let content = response["content"].as_array().unwrap();
+        assert!(!content.is_empty(), "Content should not be empty");
+
+        // First content block should be text type
+        assert_eq!(content[0]["type"], "text");
+        assert!(content[0]["text"].is_string());
+
+        // Should contain "hello" in output (direct execution of echo)
+        let text = content[0]["text"].as_str().unwrap();
+        assert!(text.contains("hello"), "Output should contain 'hello', got: {}", text);
+    }
+
+    #[tokio::test]
+    async fn test_handle_message_tools_call_with_tool_use_id() {
+        // Test that tool_use_id is extracted from _meta
+        let server = AcpMcpServer::new("test-server", "1.0.0");
+        server.set_cwd(std::env::temp_dir()).await;
+        server.set_session_id("test-session").await;
+
+        let request = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 4,
+            "method": "tools/call",
+            "params": {
+                "name": "Bash",
+                "arguments": {
+                    "command": "echo test"
+                },
+                "_meta": {
+                    "claudecode/toolUseId": "toolu_123456"
+                }
+            }
+        });
+
+        let result = server.handle_message(request).await;
+        assert!(result.is_ok(), "tools/call with tool_use_id should succeed");
+    }
+
+    #[tokio::test]
+    async fn test_handle_message_notifications_initialized() {
+        let server = AcpMcpServer::new("test-server", "1.0.0");
+
+        let request = serde_json::json!({
+            "jsonrpc": "2.0",
+            "method": "notifications/initialized",
+            "params": {}
+        });
+
+        let result = server.handle_message(request).await;
+        assert!(result.is_ok(), "notifications/initialized should succeed");
+
+        let response = result.unwrap();
+        assert!(response.is_object(), "Should return empty object");
+    }
+
+    #[tokio::test]
+    async fn test_handle_message_unknown_method() {
+        let server = AcpMcpServer::new("test-server", "1.0.0");
+
+        let request = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 5,
+            "method": "unknown/method",
+            "params": {}
+        });
+
+        let result = server.handle_message(request).await;
+        assert!(result.is_err(), "Unknown method should return error");
+    }
+
+    #[tokio::test]
+    async fn test_handle_message_read_tool() {
+        let server = AcpMcpServer::new("test-server", "1.0.0");
+        server.set_cwd(std::env::temp_dir()).await;
+        server.set_session_id("test-session").await;
+
+        // Create a test file
+        let test_file = std::env::temp_dir().join("test_read_tool.txt");
+        std::fs::write(&test_file, "test content").unwrap();
+
+        let request = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 6,
+            "method": "tools/call",
+            "params": {
+                "name": "Read",
+                "arguments": {
+                    "file_path": test_file.to_string_lossy()
+                }
+            }
+        });
+
+        let result = server.handle_message(request).await;
+        assert!(result.is_ok(), "Read tool should succeed");
+
+        let response = result.unwrap();
+        let content = response["content"].as_array().unwrap();
+        let text = content[0]["text"].as_str().unwrap();
+        assert!(text.contains("test content"), "Should contain file content");
+
+        // Clean up
+        std::fs::remove_file(test_file).ok();
+    }
+
+    #[tokio::test]
+    async fn test_handle_message_missing_method() {
+        let server = AcpMcpServer::new("test-server", "1.0.0");
+
+        let request = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 7,
+            "params": {}
+        });
+
+        let result = server.handle_message(request).await;
+        assert!(result.is_err(), "Missing method should return error");
+    }
+
+    #[tokio::test]
+    async fn test_handle_message_tools_call_missing_tool_name() {
+        let server = AcpMcpServer::new("test-server", "1.0.0");
+
+        let request = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 8,
+            "method": "tools/call",
+            "params": {
+                "arguments": {
+                    "command": "echo test"
+                }
+            }
+        });
+
+        let result = server.handle_message(request).await;
+        assert!(result.is_err(), "Missing tool name should return error");
+    }
+
+    // ============================================================
+    // Tool execution tests (without terminal client - fallback mode)
+    // ============================================================
+
+    #[tokio::test]
+    async fn test_execute_bash_without_terminal_client() {
+        let server = AcpMcpServer::new("test-server", "1.0.0");
+        server.set_cwd(std::env::temp_dir()).await;
+        server.set_session_id("test-session").await;
+
+        // Execute without terminal client (terminal_client is None by default)
+        let result = server
+            .execute_tool(
+                "Bash",
+                serde_json::json!({
+                    "command": "echo fallback_test"
+                }),
+                None,
+            )
+            .await;
+
+        assert!(result.is_ok(), "Execute should succeed");
+        let tool_result = result.unwrap();
+        assert!(!tool_result.is_error, "Should not be an error");
+        assert!(
+            tool_result.content.contains("fallback_test"),
+            "Output should contain 'fallback_test', got: {}",
+            tool_result.content
+        );
+    }
+
+    #[tokio::test]
+    async fn test_execute_glob_tool() {
+        let server = AcpMcpServer::new("test-server", "1.0.0");
+
+        // Use the project's src directory for the glob test
+        let cwd = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        server.set_cwd(&cwd).await;
+        server.set_session_id("test-session").await;
+
+        let result = server
+            .execute_tool(
+                "Glob",
+                serde_json::json!({
+                    "pattern": "src/**/*.rs"
+                }),
+                None,
+            )
+            .await;
+
+        assert!(result.is_ok(), "Glob should succeed");
+        let tool_result = result.unwrap();
+        assert!(!tool_result.is_error, "Should not be an error");
+        // Should find at least main.rs and lib.rs
+        assert!(
+            tool_result.content.contains(".rs"),
+            "Should find Rust files, got: {}",
+            tool_result.content
+        );
+    }
+
+    #[tokio::test]
+    async fn test_execute_grep_tool() {
+        let server = AcpMcpServer::new("test-server", "1.0.0");
+
+        let cwd = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        server.set_cwd(&cwd).await;
+        server.set_session_id("test-session").await;
+
+        let result = server
+            .execute_tool(
+                "Grep",
+                serde_json::json!({
+                    "pattern": "AcpMcpServer",
+                    "path": "src/mcp"
+                }),
+                None,
+            )
+            .await;
+
+        assert!(result.is_ok(), "Grep should succeed");
+        let tool_result = result.unwrap();
+        // Should find this file at least
+        assert!(
+            tool_result.content.contains("acp_server.rs") || !tool_result.is_error,
+            "Should find acp_server.rs or no error, got: {}",
+            tool_result.content
+        );
     }
 }

@@ -13,6 +13,7 @@ use claude_code_agent_sdk::{
     SystemPrompt, SystemPromptPreset,
 };
 use claude_code_agent_sdk::types::mcp::McpSdkServerConfig;
+use sacp::link::AgentToClient;
 use sacp::JrConnectionCx;
 use tokio::sync::RwLock;
 
@@ -349,7 +350,7 @@ impl Session {
     /// integration for Bash commands.
     pub async fn configure_acp_server(
         &self,
-        connection_cx: JrConnectionCx,
+        connection_cx: JrConnectionCx<AgentToClient>,
         terminal_client: Option<Arc<TerminalClient>>,
     ) {
         self.acp_mcp_server.set_session_id(&self.session_id).await;

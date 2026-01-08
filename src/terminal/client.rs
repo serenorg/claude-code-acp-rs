@@ -5,8 +5,9 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use sacp::link::AgentToClient;
 use sacp::schema::{
-    CreateTerminalRequest, CreateTerminalResponse, KillTerminalCommandRequest,
+    CreateTerminalRequest, CreateTerminalResponse, EnvVariable, KillTerminalCommandRequest,
     KillTerminalCommandResponse, ReleaseTerminalRequest, ReleaseTerminalResponse, SessionId,
     TerminalId, TerminalOutputRequest, TerminalOutputResponse, WaitForTerminalExitRequest,
     WaitForTerminalExitResponse,
@@ -23,14 +24,14 @@ use crate::types::AgentError;
 #[derive(Debug, Clone)]
 pub struct TerminalClient {
     /// Connection context for sending requests
-    connection_cx: JrConnectionCx,
+    connection_cx: JrConnectionCx<AgentToClient>,
     /// Session ID for this client
     session_id: SessionId,
 }
 
 impl TerminalClient {
     /// Create a new Terminal API client
-    pub fn new(connection_cx: JrConnectionCx, session_id: impl Into<SessionId>) -> Self {
+    pub fn new(connection_cx: JrConnectionCx<AgentToClient>, session_id: impl Into<SessionId>) -> Self {
         Self {
             connection_cx,
             session_id: session_id.into(),
@@ -58,6 +59,9 @@ impl TerminalClient {
         let mut request = CreateTerminalRequest::new(self.session_id.clone(), command);
         request = request.args(args);
 
+        // Set CLAUDECODE environment variable (required by some clients like Zed)
+        request = request.env(vec![EnvVariable::new("CLAUDECODE", "1")]);
+
         if let Some(cwd_path) = cwd {
             request = request.cwd(cwd_path);
         }
@@ -66,12 +70,16 @@ impl TerminalClient {
             request = request.output_byte_limit(limit);
         }
 
+        tracing::debug!(?request, "Sending terminal/create request");
+
         let response: CreateTerminalResponse = self
             .connection_cx
             .send_request(request)
             .block_task()
             .await
             .map_err(|e| AgentError::Internal(format!("Terminal create failed: {}", e)))?;
+
+        tracing::debug!(?response, "Received terminal/create response");
 
         Ok(response.terminal_id)
     }

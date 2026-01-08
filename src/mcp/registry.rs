@@ -3,6 +3,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use sacp::link::AgentToClient;
 use sacp::schema::{SessionId, SessionNotification, SessionUpdate, ToolCallContent, ToolCallId, ToolCallStatus, ToolCallUpdate, ToolCallUpdateFields, Terminal};
 use sacp::JrConnectionCx;
 use serde::{Deserialize, Serialize};
@@ -83,7 +84,7 @@ pub struct ToolContext {
     /// Current tool use ID (for sending mid-execution updates)
     tool_use_id: Option<String>,
     /// Connection context for sending notifications
-    connection_cx: Option<JrConnectionCx>,
+    connection_cx: Option<JrConnectionCx<AgentToClient>>,
 }
 
 impl ToolContext {
@@ -125,7 +126,7 @@ impl ToolContext {
     }
 
     /// Set the connection context for sending notifications
-    pub fn with_connection_cx(mut self, cx: JrConnectionCx) -> Self {
+    pub fn with_connection_cx(mut self, cx: JrConnectionCx<AgentToClient>) -> Self {
         self.connection_cx = Some(cx);
         self
     }

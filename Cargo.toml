@@ -24,11 +24,11 @@ path = "src/main.rs"
 
 [dependencies]
 # ACP Protocol SDK (sacp re-exports agent-client-protocol-schema types via sacp::schema)
-# Enable unstable features for session modes and models support
-sacp = { git = "https://github.com/agentclientprotocol/rust-sdk.git", branch = "main", features = ["unstable"] }
+# Using symposium-acp crates from crates.io
+sacp = "10.1.0"
 
 # Claude Agent SDK
-claude-code-agent-sdk = { version = "0.1.10" }
+claude-code-agent-sdk = { version = "0.1.17" }
 
 # Async runtime
 tokio = { version = "1.48", features = [
@@ -110,7 +110,7 @@ pretty_assertions = "1"
 tempfile = "3"
 
 [features]
-default = []
+default = ["otel"]
 # mcp = ["rmcp"]
 otel = ["opentelemetry", "opentelemetry_sdk", "opentelemetry-otlp", "tracing-opentelemetry"]
 

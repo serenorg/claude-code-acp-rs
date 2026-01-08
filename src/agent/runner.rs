@@ -4,10 +4,11 @@
 
 use std::sync::Arc;
 
+use sacp::link::AgentToClient;
 use sacp::schema::{
     CancelNotification, InitializeRequest, NewSessionRequest, PromptRequest, SetSessionModeRequest,
 };
-use sacp::{ByteStreams, JrHandlerChain, MessageAndCx, UntypedMessage};
+use sacp::{ByteStreams, JrConnectionCx, MessageCx};
 use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
@@ -249,90 +250,104 @@ async fn run_acp_server() -> Result<(), sacp::Error> {
     let sessions = agent.sessions().clone();
 
     // Build the handler chain
-    JrHandlerChain::new()
+    AgentToClient::builder()
         .name(agent.name())
         // Handle initialize request
-        .on_receive_request({
-            let config = config.clone();
-            async move |request: InitializeRequest, cx| {
-                tracing::info!(
-                    "Received initialize request (protocol version: {:?})",
-                    request.protocol_version
-                );
-                let response = handlers::handle_initialize(request, &config);
-                tracing::debug!("Sending initialize response");
-                cx.respond(response)
-            }
-        })
-        // Handle session/new request
-        .on_receive_request({
-            let config = config.clone();
-            let sessions = sessions.clone();
-            async move |request: NewSessionRequest, cx| {
-                tracing::debug!("Received session/new request");
-                match handlers::handle_new_session(request, &config, &sessions) {
-                    Ok(response) => cx.respond(response),
-                    Err(e) => cx.respond_with_error(sacp::util::internal_error(e.to_string())),
+        .on_receive_request(
+            {
+                let config = config.clone();
+                async move |request: InitializeRequest, request_cx, _connection_cx| {
+                    tracing::info!(
+                        "Received initialize request (protocol version: {:?})",
+                        request.protocol_version
+                    );
+                    let response = handlers::handle_initialize(request, &config);
+                    tracing::debug!("Sending initialize response");
+                    request_cx.respond(response)
                 }
-            }
-        })
-        // Handle session/prompt request
-        .on_receive_request({
-            let config = config.clone();
-            let sessions = sessions.clone();
-            async move |request: PromptRequest, cx| {
-                tracing::debug!(
-                    "Received session/prompt request for session {}",
-                    request.session_id.0
-                );
-
-                // Get the connection context for sending notifications
-                let connection_cx = cx.connection_cx();
-
-                // Handle the prompt with streaming
-                match handlers::handle_prompt(request, &config, &sessions, connection_cx).await {
-                    Ok(response) => cx.respond(response),
-                    Err(e) => {
-                        tracing::error!("Prompt error: {}", e);
-                        cx.respond_with_error(sacp::util::internal_error(e.to_string()))
+            },
+            sacp::on_receive_request!(),
+        )
+        // Handle session/new request
+        .on_receive_request(
+            {
+                let config = config.clone();
+                let sessions = sessions.clone();
+                async move |request: NewSessionRequest, request_cx, _connection_cx| {
+                    tracing::debug!("Received session/new request");
+                    match handlers::handle_new_session(request, &config, &sessions) {
+                        Ok(response) => request_cx.respond(response),
+                        Err(e) => request_cx.respond_with_error(sacp::util::internal_error(e.to_string())),
                     }
                 }
-            }
-        })
-        // Handle session/setMode request
-        .on_receive_request({
-            let sessions = sessions.clone();
-            async move |request: SetSessionModeRequest, cx| {
-                tracing::debug!("Received session/setMode request");
-                let connection_cx = cx.connection_cx();
-                match handlers::handle_set_mode(request, &sessions, connection_cx).await {
-                    Ok(response) => cx.respond(response),
-                    Err(e) => cx.respond_with_error(sacp::util::internal_error(e.to_string())),
+            },
+            sacp::on_receive_request!(),
+        )
+        // Handle session/prompt request
+        .on_receive_request(
+            {
+                let config = config.clone();
+                let sessions = sessions.clone();
+                async move |request: PromptRequest, request_cx, connection_cx| {
+                    tracing::debug!(
+                        "Received session/prompt request for session {}",
+                        request.session_id.0
+                    );
+
+                    // Handle the prompt with streaming
+                    match handlers::handle_prompt(request, &config, &sessions, connection_cx).await {
+                        Ok(response) => request_cx.respond(response),
+                        Err(e) => {
+                            tracing::error!("Prompt error: {}", e);
+                            request_cx.respond_with_error(sacp::util::internal_error(e.to_string()))
+                        }
+                    }
                 }
-            }
-        })
+            },
+            sacp::on_receive_request!(),
+        )
+        // Handle session/setMode request
+        .on_receive_request(
+            {
+                let sessions = sessions.clone();
+                async move |request: SetSessionModeRequest, request_cx, connection_cx| {
+                    tracing::debug!("Received session/setMode request");
+                    match handlers::handle_set_mode(request, &sessions, connection_cx).await {
+                        Ok(response) => request_cx.respond(response),
+                        Err(e) => request_cx.respond_with_error(sacp::util::internal_error(e.to_string())),
+                    }
+                }
+            },
+            sacp::on_receive_request!(),
+        )
         // Note: SetSessionModel is not yet supported by sacp SDK (JrRequest not implemented)
         // The model selection is returned in NewSessionResponse, but changing it mid-session
         // is not yet available. When sacp adds support, uncomment the following handler.
         // Handle session/cancel notification
-        .on_receive_notification({
-            let sessions = sessions.clone();
-            async move |notification: CancelNotification, _cx| {
-                tracing::debug!(
-                    "Received session/cancel notification for session {}",
-                    notification.session_id.0
-                );
-                if let Err(e) = handlers::handle_cancel(&notification.session_id.0, &sessions).await {
-                    tracing::error!("Cancel error: {}", e);
+        .on_receive_notification(
+            {
+                let sessions = sessions.clone();
+                async move |notification: CancelNotification, _connection_cx| {
+                    tracing::debug!(
+                        "Received session/cancel notification for session {}",
+                        notification.session_id.0
+                    );
+                    if let Err(e) = handlers::handle_cancel(&notification.session_id.0, &sessions).await {
+                        tracing::error!("Cancel error: {}", e);
+                    }
+                    Ok(())
                 }
-                Ok(())
-            }
-        })
+            },
+            sacp::on_receive_notification!(),
+        )
         // Handle unknown messages
-        .on_receive_message(async move |message: MessageAndCx<UntypedMessage, UntypedMessage>| {
-            tracing::warn!("Received unknown message: {:?}", message.message().method);
-            message.respond_with_error(sacp::util::internal_error("Unknown method"))
-        })
+        .on_receive_message(
+            async move |message: MessageCx, connection_cx: JrConnectionCx<AgentToClient>| {
+                tracing::warn!("Received unknown message: {:?}", message.message().method);
+                message.respond_with_error(sacp::util::internal_error("Unknown method"), connection_cx)
+            },
+            sacp::on_receive_message!(),
+        )
         // Serve over stdio
         // Note: stdout is used for ACP protocol messages, stderr is for logging
         .serve(ByteStreams::new(

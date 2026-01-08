@@ -299,7 +299,8 @@ impl ExternalMcpServer {
                     .collect();
 
                 let is_error = result
-                    .get("isError")
+                    .get("is_error")
+                    .or_else(|| result.get("isError"))  // Support both snake_case and camelCase
                     .and_then(|e| e.as_bool())
                     .unwrap_or(false);
 
