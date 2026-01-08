@@ -13,9 +13,6 @@
 [submodule "vendors/agent-client-protocol"]
 	path = vendors/agent-client-protocol
 	url = https://github.com/agentclientprotocol/agent-client-protocol.git
-[submodule "vendors/claude-code-agent-sdk"]
-	path = vendors/claude-code-agent-sdk
-	url = https://github.com/soddygo/claude-code-agent-sdk.git
 [submodule "vendors/rmcp"]
 	path = vendors/rmcp
 	url = https://github.com/modelcontextprotocol/rust-sdk.git
