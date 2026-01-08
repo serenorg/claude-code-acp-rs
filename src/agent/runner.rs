@@ -250,22 +250,33 @@ pub async fn run_acp() -> Result<(), sacp::Error> {
 /// Internal server implementation
 ///
 /// This contains the actual ACP server logic, shared by both `run_acp()` and `run_acp_with_cli()`.
+#[tracing::instrument(name = "acp_server_main")]
 async fn run_acp_server() -> Result<(), sacp::Error> {
+    let server_start_time = std::time::Instant::now();
+    
     // Check if running in interactive terminal (for debugging)
     let is_tty = atty::is(atty::Stream::Stdin);
 
     // Print startup banner for easy log identification
-    let session_id = uuid::Uuid::new_v4();
+    let agent_session_id = uuid::Uuid::new_v4();
     let start_time = chrono::Local::now().format("%Y-%m-%d %H:%M:%S%.3f");
+    
     tracing::info!("================================================================================");
     tracing::info!("  Claude Code ACP Agent - Session Start");
     tracing::info!("--------------------------------------------------------------------------------");
     tracing::info!("  Version:    {}", env!("CARGO_PKG_VERSION"));
     tracing::info!("  Start Time: {}", start_time);
-    tracing::info!("  Session ID: {}", session_id);
+    tracing::info!("  Session ID: {}", agent_session_id);
     tracing::info!("  PID:        {}", std::process::id());
     tracing::info!("  TTY Mode:   {}", if is_tty { "interactive" } else { "subprocess" });
     tracing::info!("================================================================================");
+    
+    // Log environment info
+    tracing::debug!(
+        rust_log = ?std::env::var("RUST_LOG").ok(),
+        cwd = ?std::env::current_dir().ok(),
+        "Environment configuration"
+    );
 
     if is_tty {
         // Running in interactive terminal - provide helpful message
@@ -280,11 +291,23 @@ async fn run_acp_server() -> Result<(), sacp::Error> {
     }
 
     // Create the agent
+    let agent_create_start = std::time::Instant::now();
     let agent = ClaudeAcpAgent::new();
     let config = Arc::new(agent.config().clone());
     let sessions = agent.sessions().clone();
+    let agent_create_elapsed = agent_create_start.elapsed();
+    
+    tracing::info!(
+        agent_name = %agent.name(),
+        elapsed_ms = agent_create_elapsed.as_millis(),
+        has_base_url = config.base_url.is_some(),
+        has_api_key = config.api_key.is_some(),
+        has_model = config.model.is_some(),
+        "Agent created"
+    );
 
     // Build the handler chain
+    tracing::debug!("Building ACP handler chain");
     AgentToClient::builder()
         .name(agent.name())
         // Handle initialize request
@@ -409,7 +432,21 @@ async fn run_acp_server() -> Result<(), sacp::Error> {
         ))
         .await
         .map_err(|e| {
-            tracing::error!("ACP server error: {}", e);
+            let uptime = server_start_time.elapsed();
+            tracing::error!(
+                error = %e,
+                uptime_ms = uptime.as_millis(),
+                "ACP server error"
+            );
             e
+        })
+        .map(|result| {
+            let uptime = server_start_time.elapsed();
+            tracing::info!(
+                uptime_secs = uptime.as_secs(),
+                uptime_ms = uptime.as_millis(),
+                "ACP server shutting down gracefully"
+            );
+            result
         })
 }

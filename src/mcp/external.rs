@@ -5,13 +5,22 @@
 use std::collections::HashMap;
 use std::path::Path;
 use std::process::Stdio;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, ChildStdin, ChildStdout, Command};
 use tokio::sync::RwLock;
+use tracing::{instrument, Span};
 
 use super::registry::{ToolResult, ToolSchema};
+
+/// Default timeout for MCP requests (30 seconds)
+const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Default timeout for MCP initialization (60 seconds, MCP servers may need time to start)
+const DEFAULT_INIT_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// External MCP server connection type
 pub enum McpConnection {
@@ -38,6 +47,16 @@ pub struct ExternalMcpServer {
     tools: Vec<ToolSchema>,
     /// Whether the server is initialized
     initialized: bool,
+    /// Request ID counter for JSON-RPC
+    request_id: AtomicU64,
+    /// Total requests sent to this server
+    total_requests: AtomicU64,
+    /// Total time spent on requests (in milliseconds)
+    total_request_time_ms: AtomicU64,
+    /// Time when server was connected
+    connected_at: Option<Instant>,
+    /// Time when server was initialized
+    initialized_at: Option<Instant>,
 }
 
 /// JSON-RPC request structure
@@ -81,7 +100,20 @@ struct JsonRpcError {
 
 impl ExternalMcpServer {
     /// Connect to an external MCP server via stdio
-    #[allow(clippy::unused_async)]
+    ///
+    /// This spawns the MCP server process and establishes stdio communication.
+    /// Use `initialize()` after connecting to complete the handshake.
+    #[instrument(
+        name = "mcp_connect_stdio",
+        skip(env, cwd),
+        fields(
+            server_name = %name,
+            command = %command,
+            args_count = args.len(),
+            has_env = env.is_some(),
+            has_cwd = cwd.is_some(),
+        )
+    )]
     pub async fn connect_stdio(
         name: String,
         command: &str,
@@ -89,6 +121,16 @@ impl ExternalMcpServer {
         env: Option<&HashMap<String, String>>,
         cwd: Option<&Path>,
     ) -> Result<Self, ExternalMcpError> {
+        let start_time = Instant::now();
+        
+        tracing::info!(
+            server_name = %name,
+            command = %command,
+            args = ?args,
+            cwd = ?cwd,
+            "Starting external MCP server process"
+        );
+
         let mut cmd = Command::new(command);
         cmd.args(args)
             .stdin(Stdio::piped())
@@ -96,6 +138,11 @@ impl ExternalMcpServer {
             .stderr(Stdio::null());
 
         if let Some(env) = env {
+            tracing::debug!(
+                server_name = %name,
+                env_vars = ?env.keys().collect::<Vec<_>>(),
+                "Setting environment variables for MCP server"
+            );
             cmd.envs(env);
         }
 
@@ -103,10 +150,25 @@ impl ExternalMcpServer {
             cmd.current_dir(cwd);
         }
 
-        let mut child = cmd.spawn().map_err(|e| ExternalMcpError::SpawnFailed {
-            command: command.to_string(),
-            error: e.to_string(),
+        let mut child = cmd.spawn().map_err(|e| {
+            tracing::error!(
+                server_name = %name,
+                command = %command,
+                error = %e,
+                "Failed to spawn MCP server process"
+            );
+            ExternalMcpError::SpawnFailed {
+                command: command.to_string(),
+                error: e.to_string(),
+            }
         })?;
+
+        let pid = child.id();
+        tracing::debug!(
+            server_name = %name,
+            pid = ?pid,
+            "MCP server process spawned"
+        );
 
         let stdin = child.stdin.take().ok_or(ExternalMcpError::NoStdin)?;
         let stdout = child
@@ -121,85 +183,272 @@ impl ExternalMcpServer {
             stdout,
         };
 
+        let elapsed = start_time.elapsed();
+        tracing::info!(
+            server_name = %name,
+            pid = ?pid,
+            elapsed_ms = elapsed.as_millis(),
+            "MCP server process started successfully"
+        );
+
         Ok(Self {
             name,
             connection,
             tools: Vec::new(),
             initialized: false,
+            request_id: AtomicU64::new(1),
+            total_requests: AtomicU64::new(0),
+            total_request_time_ms: AtomicU64::new(0),
+            connected_at: Some(start_time),
+            initialized_at: None,
         })
     }
 
     /// Initialize the MCP server
+    ///
+    /// Performs the MCP handshake:
+    /// 1. Send initialize request with client info
+    /// 2. Send initialized notification
+    /// 3. List available tools
+    ///
+    /// This method has a timeout to prevent indefinite blocking if the server
+    /// is unresponsive.
+    #[instrument(
+        name = "mcp_initialize",
+        skip(self),
+        fields(
+            server_name = %self.name,
+            timeout_secs = DEFAULT_INIT_TIMEOUT.as_secs(),
+        )
+    )]
     pub async fn initialize(&mut self) -> Result<(), ExternalMcpError> {
-        // Send initialize request
-        let request = JsonRpcRequest::new(
-            1,
-            "initialize",
-            Some(serde_json::json!({
-                "protocolVersion": "2024-11-05",
-                "capabilities": {},
-                "clientInfo": {
-                    "name": "claude-code-acp-rs",
-                    "version": env!("CARGO_PKG_VERSION")
-                }
-            })),
+        let init_start = Instant::now();
+        
+        tracing::info!(
+            server_name = %self.name,
+            "Starting MCP server initialization"
         );
 
-        let _response = self.send_request(request).await?;
+        // Wrap the entire initialization in a timeout
+        let init_result = tokio::time::timeout(DEFAULT_INIT_TIMEOUT, async {
+            // Send initialize request
+            let request_id = self.next_request_id();
+            let request = JsonRpcRequest::new(
+                request_id,
+                "initialize",
+                Some(serde_json::json!({
+                    "protocolVersion": "2024-11-05",
+                    "capabilities": {},
+                    "clientInfo": {
+                        "name": "claude-code-acp-rs",
+                        "version": env!("CARGO_PKG_VERSION")
+                    }
+                })),
+            );
 
-        // Send initialized notification
-        self.send_notification("notifications/initialized", None)
-            .await?;
+            tracing::debug!(
+                server_name = %self.name,
+                request_id = request_id,
+                "Sending initialize request"
+            );
 
-        // List available tools
-        let tools_request = JsonRpcRequest::new(2, "tools/list", None);
-        let tools_response = self.send_request(tools_request).await?;
+            let init_response = self.send_request_internal(request).await?;
+            
+            // Log server info if available
+            if let Some(ref result) = init_response.result {
+                if let Some(server_info) = result.get("serverInfo") {
+                    tracing::info!(
+                        server_name = %self.name,
+                        remote_server_name = ?server_info.get("name"),
+                        remote_server_version = ?server_info.get("version"),
+                        protocol_version = ?result.get("protocolVersion"),
+                        "Received initialize response from MCP server"
+                    );
+                }
+            }
 
-        // Parse tools from response
-        if let Some(result) = tools_response.result {
-            if let Some(tools) = result.get("tools").and_then(|t| t.as_array()) {
-                self.tools = tools
-                    .iter()
-                    .filter_map(|t| {
-                        let name = t.get("name")?.as_str()?;
-                        let description = t
-                            .get("description")
-                            .and_then(|d| d.as_str())
-                            .unwrap_or("");
-                        let input_schema = t
-                            .get("inputSchema")
-                            .cloned()
-                            .unwrap_or(serde_json::json!({"type": "object"}));
+            // Send initialized notification
+            tracing::debug!(
+                server_name = %self.name,
+                "Sending initialized notification"
+            );
+            self.send_notification("notifications/initialized", None).await?;
 
-                        Some(ToolSchema {
-                            name: name.to_string(),
-                            description: description.to_string(),
-                            input_schema,
+            // List available tools
+            let tools_request_id = self.next_request_id();
+            let tools_request = JsonRpcRequest::new(tools_request_id, "tools/list", None);
+            
+            tracing::debug!(
+                server_name = %self.name,
+                request_id = tools_request_id,
+                "Sending tools/list request"
+            );
+            
+            let tools_response = self.send_request_internal(tools_request).await?;
+
+            // Parse tools from response
+            if let Some(result) = tools_response.result {
+                if let Some(tools) = result.get("tools").and_then(|t| t.as_array()) {
+                    self.tools = tools
+                        .iter()
+                        .filter_map(|t| {
+                            let name = t.get("name")?.as_str()?;
+                            let description = t
+                                .get("description")
+                                .and_then(|d| d.as_str())
+                                .unwrap_or("");
+                            let input_schema = t
+                                .get("inputSchema")
+                                .cloned()
+                                .unwrap_or(serde_json::json!({"type": "object"}));
+
+                            Some(ToolSchema {
+                                name: name.to_string(),
+                                description: description.to_string(),
+                                input_schema,
+                            })
                         })
-                    })
-                    .collect();
+                        .collect();
+                    
+                    // Log tool names
+                    let tool_names: Vec<&str> = self.tools.iter().map(|t| t.name.as_str()).collect();
+                    tracing::info!(
+                        server_name = %self.name,
+                        tool_count = self.tools.len(),
+                        tools = ?tool_names,
+                        "Received tools from MCP server"
+                    );
+                }
+            }
+
+            Ok::<(), ExternalMcpError>(())
+        })
+        .await;
+
+        match init_result {
+            Ok(Ok(())) => {
+                self.initialized = true;
+                self.initialized_at = Some(Instant::now());
+                
+                let elapsed = init_start.elapsed();
+                tracing::info!(
+                    server_name = %self.name,
+                    elapsed_ms = elapsed.as_millis(),
+                    tool_count = self.tools.len(),
+                    "MCP server initialization completed successfully"
+                );
+                
+                Ok(())
+            }
+            Ok(Err(e)) => {
+                let elapsed = init_start.elapsed();
+                tracing::error!(
+                    server_name = %self.name,
+                    elapsed_ms = elapsed.as_millis(),
+                    error = %e,
+                    "MCP server initialization failed"
+                );
+                Err(e)
+            }
+            Err(_) => {
+                let elapsed = init_start.elapsed();
+                tracing::error!(
+                    server_name = %self.name,
+                    elapsed_ms = elapsed.as_millis(),
+                    timeout_secs = DEFAULT_INIT_TIMEOUT.as_secs(),
+                    "MCP server initialization timed out"
+                );
+                Err(ExternalMcpError::Timeout {
+                    operation: "initialize".to_string(),
+                    timeout_ms: DEFAULT_INIT_TIMEOUT.as_millis() as u64,
+                })
             }
         }
-
-        self.initialized = true;
-        Ok(())
+    }
+    
+    /// Generate next request ID
+    fn next_request_id(&self) -> u64 {
+        self.request_id.fetch_add(1, Ordering::SeqCst)
     }
 
-    /// Send a JSON-RPC request and wait for response
+    /// Send a JSON-RPC request and wait for response (with timeout)
+    ///
+    /// This is the public API that wraps the internal method with a timeout.
+    #[instrument(
+        name = "mcp_send_request",
+        skip(self, request),
+        fields(
+            server_name = %self.name,
+            method = %request.method,
+            request_id = request.id,
+        )
+    )]
     async fn send_request(
         &mut self,
         request: JsonRpcRequest,
     ) -> Result<JsonRpcResponse, ExternalMcpError> {
+        let method = request.method.clone();
+        let request_id = request.id;
+        
+        let result = tokio::time::timeout(
+            DEFAULT_REQUEST_TIMEOUT,
+            self.send_request_internal(request),
+        )
+        .await;
+        
+        match result {
+            Ok(inner_result) => inner_result,
+            Err(_) => {
+                tracing::error!(
+                    server_name = %self.name,
+                    method = %method,
+                    request_id = request_id,
+                    timeout_ms = DEFAULT_REQUEST_TIMEOUT.as_millis(),
+                    "MCP request timed out"
+                );
+                Err(ExternalMcpError::Timeout {
+                    operation: method,
+                    timeout_ms: DEFAULT_REQUEST_TIMEOUT.as_millis() as u64,
+                })
+            }
+        }
+    }
+
+    /// Internal implementation of send_request without timeout
+    async fn send_request_internal(
+        &mut self,
+        request: JsonRpcRequest,
+    ) -> Result<JsonRpcResponse, ExternalMcpError> {
+        let start_time = Instant::now();
+        let method = request.method.clone();
+        let request_id = request.id;
+        
         let McpConnection::Stdio { stdin, stdout, .. } = &mut self.connection;
 
         // Serialize and send request
         let request_json = serde_json::to_string(&request)
             .map_err(|e| ExternalMcpError::SerializationError(e.to_string()))?;
 
+        tracing::debug!(
+            server_name = %self.name,
+            method = %method,
+            request_id = request_id,
+            request_size = request_json.len(),
+            "Sending JSON-RPC request to MCP server"
+        );
+
         stdin
             .write_all(request_json.as_bytes())
             .await
-            .map_err(|e| ExternalMcpError::WriteError(e.to_string()))?;
+            .map_err(|e| {
+                tracing::error!(
+                    server_name = %self.name,
+                    method = %method,
+                    error = %e,
+                    "Failed to write request to MCP server"
+                );
+                ExternalMcpError::WriteError(e.to_string())
+            })?;
         stdin
             .write_all(b"\n")
             .await
@@ -209,22 +458,79 @@ impl ExternalMcpServer {
             .await
             .map_err(|e| ExternalMcpError::WriteError(e.to_string()))?;
 
+        let write_elapsed = start_time.elapsed();
+        tracing::debug!(
+            server_name = %self.name,
+            method = %method,
+            write_elapsed_ms = write_elapsed.as_millis(),
+            "Request sent, waiting for response"
+        );
+
         // Read response
         let mut line = String::new();
         stdout
             .read_line(&mut line)
             .await
-            .map_err(|e| ExternalMcpError::ReadError(e.to_string()))?;
+            .map_err(|e| {
+                tracing::error!(
+                    server_name = %self.name,
+                    method = %method,
+                    error = %e,
+                    "Failed to read response from MCP server"
+                );
+                ExternalMcpError::ReadError(e.to_string())
+            })?;
+
+        let total_elapsed = start_time.elapsed();
+        
+        // Update statistics
+        self.total_requests.fetch_add(1, Ordering::Relaxed);
+        self.total_request_time_ms.fetch_add(total_elapsed.as_millis() as u64, Ordering::Relaxed);
+
+        tracing::debug!(
+            server_name = %self.name,
+            method = %method,
+            request_id = request_id,
+            response_size = line.len(),
+            elapsed_ms = total_elapsed.as_millis(),
+            "Received response from MCP server"
+        );
 
         let response: JsonRpcResponse = serde_json::from_str(&line)
-            .map_err(|e| ExternalMcpError::DeserializationError(e.to_string()))?;
+            .map_err(|e| {
+                tracing::error!(
+                    server_name = %self.name,
+                    method = %method,
+                    error = %e,
+                    response_preview = %line.chars().take(200).collect::<String>(),
+                    "Failed to parse JSON-RPC response"
+                );
+                ExternalMcpError::DeserializationError(e.to_string())
+            })?;
 
         if let Some(error) = response.error {
+            tracing::warn!(
+                server_name = %self.name,
+                method = %method,
+                request_id = request_id,
+                error_code = error.code,
+                error_message = %error.message,
+                elapsed_ms = total_elapsed.as_millis(),
+                "MCP server returned error"
+            );
             return Err(ExternalMcpError::RpcError {
                 code: error.code,
                 message: error.message,
             });
         }
+
+        tracing::debug!(
+            server_name = %self.name,
+            method = %method,
+            request_id = request_id,
+            elapsed_ms = total_elapsed.as_millis(),
+            "MCP request completed successfully"
+        );
 
         Ok(response)
     }
@@ -263,17 +569,42 @@ impl ExternalMcpServer {
     }
 
     /// Call a tool on this server
+    ///
+    /// Executes a tool on the external MCP server with timeout protection.
+    #[instrument(
+        name = "mcp_call_tool",
+        skip(self, arguments),
+        fields(
+            server_name = %self.name,
+            tool_name = %tool_name,
+            args_size = arguments.to_string().len(),
+        )
+    )]
     pub async fn call_tool(
         &mut self,
         tool_name: &str,
         arguments: serde_json::Value,
     ) -> Result<ToolResult, ExternalMcpError> {
+        let start_time = Instant::now();
+        
         if !self.initialized {
+            tracing::error!(
+                server_name = %self.name,
+                tool_name = %tool_name,
+                "Attempted to call tool on uninitialized server"
+            );
             return Err(ExternalMcpError::NotInitialized);
         }
 
+        tracing::info!(
+            server_name = %self.name,
+            tool_name = %tool_name,
+            "Calling external MCP tool"
+        );
+
+        let request_id = self.next_request_id();
         let request = JsonRpcRequest::new(
-            3,
+            request_id,
             "tools/call",
             Some(serde_json::json!({
                 "name": tool_name,
@@ -282,6 +613,8 @@ impl ExternalMcpServer {
         );
 
         let response = self.send_request(request).await?;
+
+        let elapsed = start_time.elapsed();
 
         // Parse tool result
         if let Some(result) = response.result {
@@ -304,16 +637,58 @@ impl ExternalMcpServer {
                     .and_then(|e| e.as_bool())
                     .unwrap_or(false);
 
+                let result_preview = text.join("\n").chars().take(200).collect::<String>();
+                
                 if is_error {
+                    tracing::warn!(
+                        server_name = %self.name,
+                        tool_name = %tool_name,
+                        elapsed_ms = elapsed.as_millis(),
+                        result_preview = %result_preview,
+                        "External MCP tool returned error"
+                    );
                     return Ok(ToolResult::error(text.join("\n")));
                 }
+                
+                tracing::info!(
+                    server_name = %self.name,
+                    tool_name = %tool_name,
+                    elapsed_ms = elapsed.as_millis(),
+                    result_len = text.iter().map(|s| s.len()).sum::<usize>(),
+                    "External MCP tool completed successfully"
+                );
                 return Ok(ToolResult::success(text.join("\n")));
             }
 
             // Fallback: return raw JSON
+            tracing::info!(
+                server_name = %self.name,
+                tool_name = %tool_name,
+                elapsed_ms = elapsed.as_millis(),
+                "External MCP tool completed (raw JSON response)"
+            );
             Ok(ToolResult::success(result.to_string()))
         } else {
+            tracing::info!(
+                server_name = %self.name,
+                tool_name = %tool_name,
+                elapsed_ms = elapsed.as_millis(),
+                "External MCP tool completed (empty response)"
+            );
             Ok(ToolResult::success(""))
+        }
+    }
+    
+    /// Get server statistics
+    pub fn stats(&self) -> McpServerStats {
+        McpServerStats {
+            server_name: self.name.clone(),
+            total_requests: self.total_requests.load(Ordering::Relaxed),
+            total_request_time_ms: self.total_request_time_ms.load(Ordering::Relaxed),
+            tool_count: self.tools.len(),
+            initialized: self.initialized,
+            connected_at: self.connected_at,
+            initialized_at: self.initialized_at,
         }
     }
 
@@ -344,6 +719,17 @@ impl ExternalMcpManager {
     }
 
     /// Connect to an MCP server
+    ///
+    /// This method spawns the MCP server process, establishes communication,
+    /// and performs the MCP handshake (initialize + tools/list).
+    #[instrument(
+        name = "mcp_manager_connect",
+        skip(self, env, cwd),
+        fields(
+            server_name = %name,
+            command = %command,
+        )
+    )]
     pub async fn connect(
         &self,
         name: String,
@@ -352,14 +738,49 @@ impl ExternalMcpManager {
         env: Option<&HashMap<String, String>>,
         cwd: Option<&Path>,
     ) -> Result<(), ExternalMcpError> {
+        let overall_start = Instant::now();
+        
+        tracing::info!(
+            server_name = %name,
+            command = %command,
+            args = ?args,
+            "Connecting to external MCP server"
+        );
+
+        // Step 1: Spawn and connect
+        let connect_start = Instant::now();
         let mut server =
             ExternalMcpServer::connect_stdio(name.clone(), command, args, env, cwd).await?;
-        server.initialize().await?;
+        let connect_elapsed = connect_start.elapsed();
+        
+        tracing::debug!(
+            server_name = %name,
+            connect_elapsed_ms = connect_elapsed.as_millis(),
+            "MCP server process connected"
+        );
 
+        // Step 2: Initialize
+        let init_start = Instant::now();
+        server.initialize().await?;
+        let init_elapsed = init_start.elapsed();
+        
+        let overall_elapsed = overall_start.elapsed();
+        
         tracing::info!(
-            "Connected to MCP server '{}' with {} tools",
-            name,
-            server.tools().len()
+            server_name = %name,
+            tool_count = server.tools().len(),
+            connect_elapsed_ms = connect_elapsed.as_millis(),
+            init_elapsed_ms = init_elapsed.as_millis(),
+            total_elapsed_ms = overall_elapsed.as_millis(),
+            "Successfully connected and initialized MCP server"
+        );
+
+        // Log tool names for debugging
+        let tool_names: Vec<&str> = server.tools().iter().map(|t| t.name.as_str()).collect();
+        tracing::debug!(
+            server_name = %name,
+            tools = ?tool_names,
+            "MCP server tools available"
         );
 
         self.servers.write().await.insert(name, server);
@@ -399,26 +820,90 @@ impl ExternalMcpManager {
     /// Call a tool on an external server
     ///
     /// Tool name should be prefixed with `mcp__<server>__`
+    #[instrument(
+        name = "mcp_manager_call_tool",
+        skip(self, arguments),
+        fields(
+            full_tool_name = %full_tool_name,
+        )
+    )]
     pub async fn call_tool(
         &self,
         full_tool_name: &str,
         arguments: serde_json::Value,
     ) -> Result<ToolResult, ExternalMcpError> {
+        let start_time = Instant::now();
+        
         // Parse server name and tool name from `mcp__<server>__<tool>`
         let parts: Vec<&str> = full_tool_name.splitn(3, "__").collect();
         if parts.len() != 3 || parts[0] != "mcp" {
+            tracing::warn!(
+                full_tool_name = %full_tool_name,
+                "Invalid external MCP tool name format"
+            );
             return Err(ExternalMcpError::InvalidToolName(full_tool_name.to_string()));
         }
 
         let server_name = parts[1];
         let tool_name = parts[2];
+        
+        // Record to current span
+        Span::current().record("server_name", server_name);
+        Span::current().record("tool_name", tool_name);
+
+        tracing::debug!(
+            server_name = %server_name,
+            tool_name = %tool_name,
+            "Routing tool call to external MCP server"
+        );
 
         let mut servers = self.servers.write().await;
-        let server = servers
-            .get_mut(server_name)
-            .ok_or_else(|| ExternalMcpError::ServerNotFound(server_name.to_string()))?;
+        
+        // Check if server exists first and log available servers if not
+        if !servers.contains_key(server_name) {
+            let available: Vec<&str> = servers.keys().map(|s| s.as_str()).collect();
+            tracing::error!(
+                server_name = %server_name,
+                tool_name = %tool_name,
+                available_servers = ?available,
+                "External MCP server not found"
+            );
+            return Err(ExternalMcpError::ServerNotFound(server_name.to_string()));
+        }
+        
+        let server = servers.get_mut(server_name).unwrap();
 
-        server.call_tool(tool_name, arguments).await
+        let result = server.call_tool(tool_name, arguments).await;
+        
+        let elapsed = start_time.elapsed();
+        match &result {
+            Ok(r) => {
+                tracing::info!(
+                    server_name = %server_name,
+                    tool_name = %tool_name,
+                    elapsed_ms = elapsed.as_millis(),
+                    is_error = r.is_error,
+                    "External MCP tool call completed"
+                );
+            }
+            Err(e) => {
+                tracing::error!(
+                    server_name = %server_name,
+                    tool_name = %tool_name,
+                    elapsed_ms = elapsed.as_millis(),
+                    error = %e,
+                    "External MCP tool call failed"
+                );
+            }
+        }
+        
+        result
+    }
+    
+    /// Get statistics for all connected servers
+    pub async fn all_stats(&self) -> Vec<McpServerStats> {
+        let servers = self.servers.read().await;
+        servers.values().map(|s| s.stats()).collect()
     }
 
     /// Check if a tool name refers to an external MCP tool
@@ -444,6 +929,41 @@ impl ExternalMcpManager {
 impl Default for ExternalMcpManager {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+/// MCP server statistics
+#[derive(Debug, Clone)]
+pub struct McpServerStats {
+    /// Server name
+    pub server_name: String,
+    /// Total requests sent
+    pub total_requests: u64,
+    /// Total time spent on requests (ms)
+    pub total_request_time_ms: u64,
+    /// Number of tools available
+    pub tool_count: usize,
+    /// Whether the server is initialized
+    pub initialized: bool,
+    /// Time when server was connected
+    pub connected_at: Option<Instant>,
+    /// Time when server was initialized
+    pub initialized_at: Option<Instant>,
+}
+
+impl McpServerStats {
+    /// Get average request time in milliseconds
+    pub fn avg_request_time_ms(&self) -> f64 {
+        if self.total_requests == 0 {
+            0.0
+        } else {
+            self.total_request_time_ms as f64 / self.total_requests as f64
+        }
+    }
+    
+    /// Get uptime since connection
+    pub fn uptime(&self) -> Option<Duration> {
+        self.connected_at.map(|t| t.elapsed())
     }
 }
 
@@ -493,6 +1013,13 @@ pub enum ExternalMcpError {
     /// Server not found
     #[error("MCP server not found: {0}")]
     ServerNotFound(String),
+    
+    /// Request or operation timed out
+    #[error("MCP operation '{operation}' timed out after {timeout_ms}ms")]
+    Timeout {
+        operation: String,
+        timeout_ms: u64,
+    },
 }
 
 #[cfg(test)]

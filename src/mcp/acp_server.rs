@@ -5,6 +5,7 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::Instant;
 
 use async_trait::async_trait;
 use claude_code_agent_sdk::{
@@ -20,6 +21,7 @@ use sacp::schema::{
 use sacp::JrConnectionCx;
 use serde_json::Value;
 use tokio::sync::RwLock;
+use tracing::instrument;
 
 use super::registry::{ToolContext, ToolResult};
 use super::server::McpServer;
@@ -366,27 +368,79 @@ impl AcpMcpServer {
     }
 
     /// Execute a tool with ACP integration
-    #[tracing::instrument(skip(self, arguments), fields(tool_use_id = ?tool_use_id))]
+    #[instrument(
+        name = "acp_execute_tool",
+        skip(self, arguments),
+        fields(
+            tool_name = %tool_name,
+            tool_use_id = ?tool_use_id,
+            args_size = arguments.to_string().len(),
+        )
+    )]
     async fn execute_tool(
         &self,
         tool_name: &str,
         arguments: Value,
         tool_use_id: Option<&str>,
     ) -> Result<ToolResult, String> {
-        tracing::info!("Executing tool: {}", tool_name);
+        let start_time = Instant::now();
+        
+        // Log arguments preview (truncated for large inputs)
+        let args_str = arguments.to_string();
+        let args_preview = if args_str.len() > 500 {
+            format!("{}...(truncated)", &args_str[..500])
+        } else {
+            args_str.clone()
+        };
+        
+        tracing::info!(
+            tool_name = %tool_name,
+            tool_use_id = ?tool_use_id,
+            args_preview = %args_preview,
+            "Executing ACP tool"
+        );
+        
         let context = self.create_tool_context(tool_use_id).await;
 
         // Special handling for Bash tool - send terminal update after terminal creation
-        if tool_name == "Bash" {
-            return self
-                .execute_bash_tool(arguments, tool_use_id, &context)
-                .await;
+        let result = if tool_name == "Bash" {
+            self.execute_bash_tool(arguments, tool_use_id, &context).await
+        } else {
+            // Execute other tools normally
+            let result = self.mcp_server.execute(tool_name, arguments, &context).await;
+            Ok(result)
+        };
+        
+        let elapsed = start_time.elapsed();
+        
+        match &result {
+            Ok(r) => {
+                let content_preview = if r.content.len() > 300 {
+                    format!("{}...(truncated)", &r.content[..300])
+                } else {
+                    r.content.clone()
+                };
+                
+                tracing::info!(
+                    tool_name = %tool_name,
+                    elapsed_ms = elapsed.as_millis(),
+                    is_error = r.is_error,
+                    content_len = r.content.len(),
+                    content_preview = %content_preview,
+                    "ACP tool completed"
+                );
+            }
+            Err(e) => {
+                tracing::error!(
+                    tool_name = %tool_name,
+                    elapsed_ms = elapsed.as_millis(),
+                    error = %e,
+                    "ACP tool execution failed"
+                );
+            }
         }
-
-        // Execute other tools normally
-        let result = self.mcp_server.execute(tool_name, arguments, &context).await;
-        tracing::info!("Tool {} completed, is_error: {}", tool_name, result.is_error);
-        Ok(result)
+        
+        result
     }
 
     /// Execute Bash tool with streaming output via meta field
@@ -399,13 +453,20 @@ impl AcpMcpServer {
     /// - terminal_info: { terminal_id, cwd } - sent at start
     /// - terminal_output: { terminal_id, data } - sent for each output chunk
     /// - terminal_exit: { terminal_id, exit_code } - sent when command completes
-    #[tracing::instrument(skip(self, arguments, context), fields(tool_use_id = ?tool_use_id))]
+    #[instrument(
+        name = "acp_bash_tool",
+        skip(self, arguments, context),
+        fields(
+            tool_use_id = ?tool_use_id,
+        )
+    )]
     async fn execute_bash_tool(
         &self,
         arguments: Value,
         tool_use_id: Option<&str>,
         context: &ToolContext,
     ) -> Result<ToolResult, String> {
+        let bash_start = Instant::now();
         let connection_cx = self.connection_cx.read().await;
         let session_id_guard = self.session_id.read().await;
 
@@ -440,6 +501,8 @@ impl AcpMcpServer {
             description = ?description,
             terminal_id = %terminal_id,
             run_in_background = run_in_background,
+            timeout_ms = timeout_ms,
+            cwd = ?context.cwd,
             "Executing Bash command with streaming output"
         );
 
@@ -521,6 +584,15 @@ impl AcpMcpServer {
             }
         }
 
+        let bash_elapsed = bash_start.elapsed();
+        tracing::info!(
+            command = %command,
+            terminal_id = %terminal_id,
+            total_elapsed_ms = bash_elapsed.as_millis(),
+            is_error = result.as_ref().map(|r| r.is_error).unwrap_or(true),
+            "Bash command completed"
+        );
+        
         result
     }
 
@@ -739,16 +811,37 @@ impl ToolHandler for PlaceholderHandler {
 
 #[async_trait]
 impl SdkMcpServer for AcpMcpServer {
+    #[instrument(
+        name = "acp_handle_message",
+        skip(self, message),
+        fields(
+            method = tracing::field::Empty,
+            message_size = message.to_string().len(),
+        )
+    )]
     async fn handle_message(&self, message: Value) -> claude_code_agent_sdk::errors::Result<Value> {
+        let start_time = Instant::now();
+        
         let method = message["method"]
             .as_str()
             .ok_or_else(|| claude_code_agent_sdk::errors::ClaudeError::Transport("Missing method".to_string()))?;
 
-        tracing::debug!(method = %method, "AcpMcpServer handling message");
+        // Record method to span
+        tracing::Span::current().record("method", method);
+        
+        tracing::debug!(
+            method = %method,
+            message_id = ?message.get("id"),
+            "AcpMcpServer handling message"
+        );
 
-        match method {
+        let result = match method {
             "initialize" => {
-                tracing::info!("MCP server initializing");
+                tracing::info!(
+                    server_name = %self.name,
+                    server_version = %self.version,
+                    "ACP MCP server initializing"
+                );
                 Ok(serde_json::json!({
                     "protocolVersion": "2024-11-05",
                     "capabilities": {
@@ -761,7 +854,6 @@ impl SdkMcpServer for AcpMcpServer {
                 }))
             }
             "tools/list" => {
-                tracing::info!("MCP server received tools/list request");
                 let tools: Vec<_> = self
                     .tools
                     .values()
@@ -774,9 +866,11 @@ impl SdkMcpServer for AcpMcpServer {
                     })
                     .collect();
 
-                tracing::info!("MCP server returning {} tools: {:?}",
-                    tools.len(),
-                    tools.iter().map(|t| t["name"].as_str().unwrap_or("")).collect::<Vec<_>>()
+                let tool_names: Vec<&str> = self.tools.keys().map(|s| s.as_str()).collect();
+                tracing::info!(
+                    tool_count = tools.len(),
+                    tools = ?tool_names,
+                    "Returning tool list"
                 );
                 Ok(serde_json::json!({
                     "tools": tools
@@ -799,19 +893,27 @@ impl SdkMcpServer for AcpMcpServer {
                     tool_name = %tool_name,
                     tool_use_id = ?tool_use_id,
                     has_meta = params.get("_meta").is_some(),
-                    "Received tools/call request"
+                    args_size = arguments.to_string().len(),
+                    "Received tools/call request from Claude CLI"
                 );
 
+                let tool_start = Instant::now();
                 let result = self
                     .execute_tool(tool_name, arguments, tool_use_id)
                     .await
                     .map_err(|e| {
-                        tracing::error!(error = %e, "Tool execution failed");
+                        tracing::error!(
+                            tool_name = %tool_name,
+                            error = %e,
+                            "Tool execution failed"
+                        );
                         claude_code_agent_sdk::errors::ClaudeError::Transport(e)
                     })?;
+                let tool_elapsed = tool_start.elapsed();
 
                 tracing::info!(
                     tool_name = %tool_name,
+                    elapsed_ms = tool_elapsed.as_millis(),
                     is_error = result.is_error,
                     content_len = result.content.len(),
                     "Tool execution completed"
@@ -830,7 +932,10 @@ impl SdkMcpServer for AcpMcpServer {
                 // Handle cancellation notification
                 // The request_id is in params.requestId
                 let request_id = message["params"]["requestId"].as_str();
-                tracing::info!(request_id = ?request_id, "Received MCP cancellation notification");
+                tracing::info!(
+                    request_id = ?request_id,
+                    "Received MCP cancellation notification"
+                );
 
                 // Call the cancel callback to interrupt Claude CLI
                 let callback = self.cancel_callback.read().await;
@@ -844,26 +949,49 @@ impl SdkMcpServer for AcpMcpServer {
                 Ok(serde_json::json!({}))
             }
             "notifications/initialized" => {
-                tracing::info!("Received initialized notification");
+                tracing::debug!("Received initialized notification from Claude CLI");
                 Ok(serde_json::json!({}))
             }
             "notifications/progress" => {
-                tracing::debug!("Received progress notification");
+                let progress_token = message["params"]["progressToken"].as_str();
+                let progress = message["params"]["progress"].as_f64();
+                tracing::trace!(
+                    progress_token = ?progress_token,
+                    progress = ?progress,
+                    "Received progress notification"
+                );
                 Ok(serde_json::json!({}))
             }
             _ => {
                 // Check if it's a notification (starts with "notifications/")
                 if method.starts_with("notifications/") {
-                    tracing::debug!(method = %method, "Received unknown notification, ignoring");
+                    tracing::debug!(
+                        method = %method,
+                        "Received unknown notification, ignoring"
+                    );
                     Ok(serde_json::json!({}))
                 } else {
+                    tracing::warn!(
+                        method = %method,
+                        "Received unknown method"
+                    );
                     Err(claude_code_agent_sdk::errors::ClaudeError::Transport(format!(
                         "Unknown method: {}",
                         method
                     )))
                 }
             }
-        }
+        };
+        
+        let elapsed = start_time.elapsed();
+        tracing::debug!(
+            method = %method,
+            elapsed_ms = elapsed.as_millis(),
+            is_ok = result.is_ok(),
+            "Message handling completed"
+        );
+        
+        result
     }
 
     fn list_tools(&self) -> Vec<ToolDefinition> {

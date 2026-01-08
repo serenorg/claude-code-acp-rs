@@ -178,22 +178,49 @@ impl McpServer {
     ///
     /// * `servers` - MCP server configurations from settings
     /// * `cwd` - Working directory for relative paths
+    #[tracing::instrument(
+        name = "connect_external_mcp_servers",
+        skip(self, servers, cwd),
+        fields(
+            server_count = servers.len(),
+        )
+    )]
     pub async fn connect_external_servers(
         &self,
         servers: &std::collections::HashMap<String, McpServerConfig>,
         cwd: Option<&Path>,
     ) -> Vec<ExternalMcpError> {
+        let start_time = std::time::Instant::now();
         let mut errors = Vec::new();
+        let mut success_count = 0;
+        let mut skip_count = 0;
+        let total_count = servers.len();
+
+        tracing::info!(
+            total_servers = total_count,
+            cwd = ?cwd,
+            "Starting to connect external MCP servers"
+        );
 
         for (name, config) in servers {
             // Skip disabled servers
             if config.disabled {
-                tracing::debug!("Skipping disabled MCP server: {}", name);
+                skip_count += 1;
+                tracing::debug!(
+                    server_name = %name,
+                    "Skipping disabled MCP server"
+                );
                 continue;
             }
 
-            tracing::info!("Connecting to MCP server: {}", name);
+            tracing::info!(
+                server_name = %name,
+                command = %config.command,
+                args = ?config.args,
+                "Connecting to external MCP server"
+            );
 
+            let server_start = std::time::Instant::now();
             if let Err(e) = self
                 .external
                 .connect(
@@ -205,10 +232,35 @@ impl McpServer {
                 )
                 .await
             {
-                tracing::error!("Failed to connect to MCP server '{}': {}", name, e);
+                let elapsed = server_start.elapsed();
+                tracing::error!(
+                    server_name = %name,
+                    command = %config.command,
+                    error = %e,
+                    elapsed_ms = elapsed.as_millis(),
+                    "Failed to connect to MCP server"
+                );
                 errors.push(e);
+            } else {
+                success_count += 1;
+                let elapsed = server_start.elapsed();
+                tracing::info!(
+                    server_name = %name,
+                    elapsed_ms = elapsed.as_millis(),
+                    "Successfully connected to MCP server"
+                );
             }
         }
+
+        let total_elapsed = start_time.elapsed();
+        tracing::info!(
+            total_servers = total_count,
+            success_count = success_count,
+            error_count = errors.len(),
+            skip_count = skip_count,
+            total_elapsed_ms = total_elapsed.as_millis(),
+            "Finished connecting external MCP servers"
+        );
 
         errors
     }

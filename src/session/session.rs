@@ -7,6 +7,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::time::Instant;
 
 use claude_code_agent_sdk::{
     ClaudeAgentOptions, ClaudeClient, HookEvent, HookMatcher, McpServerConfig, McpServers,
@@ -16,6 +17,7 @@ use claude_code_agent_sdk::types::mcp::McpSdkServerConfig;
 use sacp::link::AgentToClient;
 use sacp::JrConnectionCx;
 use tokio::sync::RwLock;
+use tracing::instrument;
 
 use crate::converter::NotificationConverter;
 use crate::hooks::{
@@ -92,12 +94,29 @@ impl Session {
     /// * `cwd` - Working directory
     /// * `config` - Agent configuration from environment
     /// * `meta` - Session metadata from the new session request
+    #[instrument(
+        name = "session_create",
+        skip(config, meta),
+        fields(
+            session_id = %session_id,
+            cwd = ?cwd,
+            has_meta = meta.is_some(),
+        )
+    )]
     pub fn new(
         session_id: String,
         cwd: PathBuf,
         config: &AgentConfig,
         meta: Option<&NewSessionMeta>,
     ) -> Result<Self> {
+        let start_time = Instant::now();
+        
+        tracing::info!(
+            session_id = %session_id,
+            cwd = ?cwd,
+            "Creating new session"
+        );
+
         // Create hook callback registry
         let hook_callback_registry = Arc::new(HookCallbackRegistry::new());
 
@@ -119,6 +138,11 @@ impl Session {
             HookEvent::PostToolUse,
             vec![HookMatcher::builder().hooks(vec![post_tool_use_hook]).build()],
         );
+        
+        tracing::debug!(
+            session_id = %session_id,
+            "Hooks configured: PreToolUse, PostToolUse"
+        );
 
         // Create ACP MCP server
         let acp_mcp_server = Arc::new(AcpMcpServer::new("acp", env!("CARGO_PKG_VERSION")));
@@ -136,9 +160,10 @@ impl Session {
             }),
         );
 
-        tracing::info!(
-            "Registering ACP MCP server with {} entries",
-            mcp_servers_dict.len()
+        tracing::debug!(
+            session_id = %session_id,
+            mcp_server_count = mcp_servers_dict.len(),
+            "MCP servers configured"
         );
 
         // Build ClaudeAgentOptions
@@ -151,28 +176,49 @@ impl Session {
         // Verify mcp_servers is set correctly
         match &options.mcp_servers {
             McpServers::Dict(dict) => {
-                tracing::info!("MCP servers configured: {:?}", dict.keys().collect::<Vec<_>>());
+                tracing::debug!(
+                    session_id = %session_id,
+                    servers = ?dict.keys().collect::<Vec<_>>(),
+                    "MCP servers registered"
+                );
             }
             McpServers::Empty => {
-                tracing::warn!("MCP servers is Empty - this is unexpected!");
+                tracing::warn!(
+                    session_id = %session_id,
+                    "MCP servers is Empty - this is unexpected!"
+                );
             }
             McpServers::Path(p) => {
-                tracing::warn!("MCP servers is Path({:?}) - this is unexpected!", p);
+                tracing::warn!(
+                    session_id = %session_id,
+                    path = ?p,
+                    "MCP servers is Path - this is unexpected!"
+                );
             }
         }
 
         // Configure ACP tools to replace CLI built-in tools
         // This disables CLI's built-in tools and enables our MCP tools with mcp__acp__ prefix
-        options.use_acp_tools(&get_acp_replacement_tools());
+        let acp_tools = get_acp_replacement_tools();
+        options.use_acp_tools(&acp_tools);
 
-        tracing::info!(
-            "Configured ACP tools - disallowed: {:?}, allowed: {:?}",
-            options.disallowed_tools,
-            options.allowed_tools
+        tracing::debug!(
+            session_id = %session_id,
+            acp_tools = ?acp_tools,
+            disallowed_tools = ?options.disallowed_tools,
+            allowed_tools = ?options.allowed_tools,
+            "ACP tools configured"
         );
 
         // Apply config from environment
         config.apply_to_options(&mut options);
+        
+        tracing::debug!(
+            session_id = %session_id,
+            has_model = options.model.is_some(),
+            has_base_url = config.base_url.is_some(),
+            "Agent config applied"
+        );
 
         // Apply meta options if provided
         if let Some(meta) = meta {
@@ -180,23 +226,42 @@ impl Session {
             if let Some(replace) = meta.get_system_prompt_replace() {
                 // Complete replacement of system prompt
                 options.system_prompt = Some(SystemPrompt::Text(replace.to_string()));
-                tracing::info!("Using custom system prompt from meta (replace)");
+                tracing::info!(
+                    session_id = %session_id,
+                    prompt_len = replace.len(),
+                    "Using custom system prompt from meta (replace)"
+                );
             } else if let Some(append) = meta.get_system_prompt_append() {
                 // Append to default claude_code preset
                 let preset = SystemPromptPreset::with_append("claude_code", append);
                 options.system_prompt = Some(SystemPrompt::Preset(preset));
-                tracing::info!("Appending to system prompt from meta");
+                tracing::info!(
+                    session_id = %session_id,
+                    append_len = append.len(),
+                    "Appending to system prompt from meta"
+                );
             }
 
             // Set resume session if provided
             if let Some(resume_id) = meta.get_resume_session_id() {
                 options.resume = Some(resume_id.to_string());
-                tracing::info!("Resuming session: {}", resume_id);
+                tracing::info!(
+                    session_id = %session_id,
+                    resume_session_id = %resume_id,
+                    "Resuming from previous session"
+                );
             }
         }
 
         // Create the client
         let client = ClaudeClient::new(options);
+
+        let elapsed = start_time.elapsed();
+        tracing::info!(
+            session_id = %session_id,
+            elapsed_ms = elapsed.as_millis(),
+            "Session created successfully"
+        );
 
         Ok(Self {
             session_id,
@@ -215,27 +280,92 @@ impl Session {
         })
     }
 
-    /// Connect to Claude
+    /// Connect to Claude CLI
+    ///
+    /// This spawns the Claude CLI process and establishes JSON-RPC communication.
+    #[instrument(
+        name = "session_connect",
+        skip(self),
+        fields(session_id = %self.session_id)
+    )]
     pub async fn connect(&self) -> Result<()> {
         if self.connected.load(Ordering::SeqCst) {
+            tracing::debug!(
+                session_id = %self.session_id,
+                "Already connected to Claude CLI"
+            );
             return Ok(());
         }
 
+        let start_time = Instant::now();
+        tracing::info!(
+            session_id = %self.session_id,
+            cwd = ?self.cwd,
+            "Connecting to Claude CLI..."
+        );
+
         let mut client = self.client.write().await;
-        client.connect().await.map_err(AgentError::from)?;
+        client.connect().await.map_err(|e| {
+            tracing::error!(
+                session_id = %self.session_id,
+                error = %e,
+                "Failed to connect to Claude CLI"
+            );
+            AgentError::from(e)
+        })?;
+        
         self.connected.store(true, Ordering::SeqCst);
+        
+        let elapsed = start_time.elapsed();
+        tracing::info!(
+            session_id = %self.session_id,
+            elapsed_ms = elapsed.as_millis(),
+            "Successfully connected to Claude CLI"
+        );
+        
         Ok(())
     }
 
-    /// Disconnect from Claude
+    /// Disconnect from Claude CLI
+    #[instrument(
+        name = "session_disconnect",
+        skip(self),
+        fields(session_id = %self.session_id)
+    )]
     pub async fn disconnect(&self) -> Result<()> {
         if !self.connected.load(Ordering::SeqCst) {
+            tracing::debug!(
+                session_id = %self.session_id,
+                "Already disconnected from Claude CLI"
+            );
             return Ok(());
         }
 
+        let start_time = Instant::now();
+        tracing::info!(
+            session_id = %self.session_id,
+            "Disconnecting from Claude CLI..."
+        );
+
         let mut client = self.client.write().await;
-        client.disconnect().await.map_err(AgentError::from)?;
+        client.disconnect().await.map_err(|e| {
+            tracing::error!(
+                session_id = %self.session_id,
+                error = %e,
+                "Failed to disconnect from Claude CLI"
+            );
+            AgentError::from(e)
+        })?;
+        
         self.connected.store(false, Ordering::SeqCst);
+        
+        let elapsed = start_time.elapsed();
+        tracing::info!(
+            session_id = %self.session_id,
+            elapsed_ms = elapsed.as_millis(),
+            "Disconnected from Claude CLI"
+        );
+        
         Ok(())
     }
 
@@ -260,18 +390,38 @@ impl Session {
     }
 
     /// Cancel this session and interrupt the Claude CLI
+    #[instrument(
+        name = "session_cancel",
+        skip(self),
+        fields(session_id = %self.session_id)
+    )]
     pub async fn cancel(&self) {
+        tracing::info!(
+            session_id = %self.session_id,
+            "Cancelling session and sending interrupt signal"
+        );
+        
         self.cancelled.store(true, Ordering::SeqCst);
 
         // Send interrupt signal to Claude CLI to stop current operation
         if let Ok(client) = self.client.try_read() {
             if let Err(e) = client.interrupt().await {
-                tracing::warn!("Failed to send interrupt signal: {}", e);
+                tracing::warn!(
+                    session_id = %self.session_id,
+                    error = %e,
+                    "Failed to send interrupt signal to Claude CLI"
+                );
             } else {
-                tracing::info!("Sent interrupt signal to Claude CLI");
+                tracing::info!(
+                    session_id = %self.session_id,
+                    "Interrupt signal sent to Claude CLI"
+                );
             }
         } else {
-            tracing::warn!("Could not acquire client lock for interrupt");
+            tracing::warn!(
+                session_id = %self.session_id,
+                "Could not acquire client lock for interrupt"
+            );
         }
     }
 

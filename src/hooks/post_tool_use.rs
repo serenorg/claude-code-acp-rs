@@ -3,6 +3,7 @@
 //! Executes registered callbacks after tool execution completes.
 
 use std::sync::Arc;
+use std::time::Instant;
 
 use claude_code_agent_sdk::{
     HookCallback, HookContext, HookInput, HookJsonOutput, SyncHookJsonOutput,
@@ -29,6 +30,8 @@ pub fn create_post_tool_use_hook(callback_registry: Arc<HookCallbackRegistry>) -
             let callback_registry = callback_registry.clone();
 
             Box::pin(async move {
+                let start_time = Instant::now();
+                
                 // Only handle PostToolUse events
                 let (tool_name, tool_input, tool_response) = match &input {
                     HookInput::PostToolUse(post_tool) => (
@@ -44,31 +47,55 @@ pub fn create_post_tool_use_hook(callback_registry: Arc<HookCallbackRegistry>) -
                     }
                 };
 
+                // Get response preview for logging
+                let response_preview = tool_response
+                    .as_str()
+                    .map(|s| s.chars().take(100).collect::<String>())
+                    .unwrap_or_else(|| tool_response.to_string().chars().take(100).collect());
+
+                tracing::debug!(
+                    tool_name = %tool_name,
+                    tool_use_id = ?tool_use_id,
+                    response_preview = %response_preview,
+                    "PostToolUse hook triggered"
+                );
+
                 // Execute callback if registered
-                if let Some(tool_use_id) = tool_use_id {
+                if let Some(ref tool_use_id) = tool_use_id {
+                    let callback_start = Instant::now();
                     let executed = callback_registry
-                        .execute_post_tool_use(&tool_use_id, tool_input.clone(), tool_response)
+                        .execute_post_tool_use(tool_use_id, tool_input.clone(), tool_response)
                         .await;
+                    let callback_elapsed = callback_start.elapsed();
 
                     if executed {
-                        tracing::debug!(
-                            "[PostToolUseHook] Executed callback for tool: {}, ID: {}",
-                            tool_name,
-                            tool_use_id
+                        tracing::info!(
+                            tool_name = %tool_name,
+                            tool_use_id = %tool_use_id,
+                            callback_elapsed_us = callback_elapsed.as_micros(),
+                            "PostToolUse callback executed"
                         );
                     } else {
-                        tracing::debug!(
-                            "[PostToolUseHook] No callback found for tool: {}, ID: {}",
-                            tool_name,
-                            tool_use_id
+                        tracing::trace!(
+                            tool_name = %tool_name,
+                            tool_use_id = %tool_use_id,
+                            "No callback registered for tool"
                         );
                     }
                 } else {
-                    tracing::debug!(
-                        "[PostToolUseHook] No tool_use_id provided for tool: {}",
-                        tool_name
+                    tracing::trace!(
+                        tool_name = %tool_name,
+                        "No tool_use_id provided for PostToolUse hook"
                     );
                 }
+
+                let elapsed = start_time.elapsed();
+                tracing::debug!(
+                    tool_name = %tool_name,
+                    tool_use_id = ?tool_use_id,
+                    total_elapsed_us = elapsed.as_micros(),
+                    "PostToolUse hook completed"
+                );
 
                 HookJsonOutput::Sync(SyncHookJsonOutput {
                     continue_: Some(true),

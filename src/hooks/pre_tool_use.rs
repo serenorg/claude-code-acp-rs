@@ -3,6 +3,7 @@
 //! Checks permissions using SettingsManager before tool execution.
 
 use std::sync::Arc;
+use std::time::Instant;
 
 use claude_code_agent_sdk::{
     HookCallback, HookContext, HookInput, HookJsonOutput, HookSpecificOutput,
@@ -28,10 +29,12 @@ use crate::settings::PermissionChecker;
 pub fn create_pre_tool_use_hook(
     permission_checker: Arc<RwLock<PermissionChecker>>,
 ) -> HookCallback {
-    Arc::new(move |input: HookInput, _tool_use_id: Option<String>, _context: HookContext| {
+    Arc::new(move |input: HookInput, tool_use_id: Option<String>, _context: HookContext| {
         let permission_checker = permission_checker.clone();
 
         Box::pin(async move {
+            let start_time = Instant::now();
+            
             // Only handle PreToolUse events
             let (tool_name, tool_input) = match &input {
                 HookInput::PreToolUse(pre_tool) => {
@@ -45,15 +48,24 @@ pub fn create_pre_tool_use_hook(
                 }
             };
 
+            tracing::debug!(
+                tool_name = %tool_name,
+                tool_use_id = ?tool_use_id,
+                "PreToolUse hook triggered"
+            );
+
             // Check permission
             let checker = permission_checker.read().await;
             let permission_check = checker.check_permission(&tool_name, &tool_input);
+            let elapsed = start_time.elapsed();
 
-            tracing::debug!(
-                "[PreToolUseHook] Tool: {}, Decision: {:?}, Rule: {:?}",
-                tool_name,
-                permission_check.decision,
-                permission_check.rule
+            tracing::info!(
+                tool_name = %tool_name,
+                tool_use_id = ?tool_use_id,
+                decision = ?permission_check.decision,
+                rule = ?permission_check.rule,
+                elapsed_us = elapsed.as_micros(),
+                "Permission check completed"
             );
 
             match permission_check.decision {
@@ -61,6 +73,12 @@ pub fn create_pre_tool_use_hook(
                     let reason = format!(
                         "Allowed by settings rule: {}",
                         permission_check.rule.as_deref().unwrap_or("(implicit)")
+                    );
+
+                    tracing::debug!(
+                        tool_name = %tool_name,
+                        reason = %reason,
+                        "Tool execution allowed"
                     );
 
                     HookJsonOutput::Sync(SyncHookJsonOutput {
@@ -82,6 +100,12 @@ pub fn create_pre_tool_use_hook(
                         permission_check.rule.as_deref().unwrap_or("(implicit)")
                     );
 
+                    tracing::warn!(
+                        tool_name = %tool_name,
+                        reason = %reason,
+                        "Tool execution denied"
+                    );
+
                     HookJsonOutput::Sync(SyncHookJsonOutput {
                         continue_: Some(true),
                         hook_specific_output: Some(HookSpecificOutput::PreToolUse(
@@ -96,6 +120,11 @@ pub fn create_pre_tool_use_hook(
                 }
 
                 crate::settings::PermissionDecision::Ask => {
+                    tracing::debug!(
+                        tool_name = %tool_name,
+                        "Tool requires permission prompt"
+                    );
+                    
                     // Let the normal permission flow continue
                     HookJsonOutput::Sync(SyncHookJsonOutput {
                         continue_: Some(true),

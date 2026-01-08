@@ -7,6 +7,7 @@
 //! - session/setMode: Set permission mode
 
 use std::sync::Arc;
+use std::time::Instant;
 
 use futures::StreamExt;
 use sacp::link::AgentToClient;
@@ -18,6 +19,7 @@ use sacp::schema::{
     SetSessionModeResponse, StopReason, TextContent,
 };
 use sacp::JrConnectionCx;
+use tracing::instrument;
 
 use crate::session::{PermissionMode, SessionManager};
 use crate::terminal::TerminalClient;
@@ -26,11 +28,25 @@ use crate::types::{AgentConfig, AgentError, NewSessionMeta};
 /// Handle initialize request
 ///
 /// Returns the agent's capabilities and protocol version.
-#[tracing::instrument(skip(request, _config), fields(protocol_version = ?request.protocol_version))]
+#[instrument(
+    name = "acp_initialize",
+    skip(request, _config),
+    fields(
+        protocol_version = ?request.protocol_version,
+        agent_version = %env!("CARGO_PKG_VERSION"),
+    )
+)]
 pub fn handle_initialize(
     request: InitializeRequest,
     _config: &AgentConfig,
 ) -> InitializeResponse {
+    tracing::info!(
+        protocol_version = ?request.protocol_version,
+        agent_name = "claude-code-acp-rs",
+        agent_version = %env!("CARGO_PKG_VERSION"),
+        "Handling ACP initialize request"
+    );
+
     // Build agent capabilities using builder pattern
     let prompt_caps = PromptCapabilities::new()
         .image(true)
@@ -43,6 +59,11 @@ pub fn handle_initialize(
     let agent_info = Implementation::new("claude-code-acp-rs", env!("CARGO_PKG_VERSION"))
         .title("Claude Code");
 
+    tracing::debug!(
+        capabilities = ?capabilities,
+        "Sending initialize response with capabilities"
+    );
+
     // Build response
     InitializeResponse::new(request.protocol_version)
         .agent_capabilities(capabilities)
@@ -53,12 +74,27 @@ pub fn handle_initialize(
 ///
 /// Creates a new session with the given working directory and metadata.
 /// Returns available modes and models for the session.
-#[tracing::instrument(skip(request, config, sessions), fields(cwd = ?request.cwd))]
+#[instrument(
+    name = "acp_new_session",
+    skip(request, config, sessions),
+    fields(
+        cwd = ?request.cwd,
+        has_meta = request.meta.is_some(),
+    )
+)]
 pub fn handle_new_session(
     request: NewSessionRequest,
     config: &AgentConfig,
     sessions: &Arc<SessionManager>,
 ) -> Result<NewSessionResponse, AgentError> {
+    let start_time = Instant::now();
+    
+    tracing::info!(
+        cwd = ?request.cwd,
+        has_meta = request.meta.is_some(),
+        "Creating new ACP session"
+    );
+
     // Parse metadata from request if present
     let meta = request.meta.as_ref().and_then(|m| {
         serde_json::to_value(m)
@@ -72,12 +108,25 @@ pub fn handle_new_session(
     // Generate session ID
     let session_id = uuid::Uuid::new_v4().to_string();
 
+    tracing::debug!(
+        session_id = %session_id,
+        "Generated new session ID"
+    );
+
     // Create the session
-    sessions.create_session(session_id.clone(), cwd, config, meta.as_ref())?;
+    sessions.create_session(session_id.clone(), cwd.clone(), config, meta.as_ref())?;
 
     // Build available modes
     let available_modes = build_available_modes();
     let mode_state = SessionModeState::new("default", available_modes);
+
+    let elapsed = start_time.elapsed();
+    tracing::info!(
+        session_id = %session_id,
+        cwd = ?cwd,
+        elapsed_ms = elapsed.as_millis(),
+        "New session created successfully"
+    );
 
     Ok(NewSessionResponse::new(session_id)
         .modes(mode_state))
@@ -91,20 +140,29 @@ pub fn handle_new_session(
 /// Note: Unlike TS implementation which doesn't support loadSession,
 /// our Rust implementation uses claude-code-agent-sdk's resume functionality
 /// to restore conversation history.
-#[tracing::instrument(skip(request, config, sessions), fields(session_id = %request.session_id.0, cwd = ?request.cwd))]
+#[instrument(
+    name = "acp_load_session",
+    skip(request, config, sessions),
+    fields(
+        session_id = %request.session_id.0,
+        cwd = ?request.cwd,
+    )
+)]
 pub fn handle_load_session(
     request: LoadSessionRequest,
     config: &AgentConfig,
     sessions: &Arc<SessionManager>,
 ) -> Result<LoadSessionResponse, AgentError> {
+    let start_time = Instant::now();
+    
     // The session_id in the request is the ID of the session to resume
     let resume_session_id = request.session_id.0.to_string();
     let cwd = request.cwd;
 
     tracing::info!(
-        "Loading session {} from cwd {:?}",
-        resume_session_id,
-        cwd
+        session_id = %resume_session_id,
+        cwd = ?cwd,
+        "Loading existing session"
     );
 
     // Create NewSessionMeta with resume option
@@ -119,17 +177,31 @@ pub fn handle_load_session(
     // Check if session already exists in our manager
     // If it does, we just return success (session already loaded)
     if sessions.has_session(&session_id) {
-        tracing::info!("Session {} already exists, returning existing session", session_id);
+        let elapsed = start_time.elapsed();
+        tracing::info!(
+            session_id = %session_id,
+            elapsed_ms = elapsed.as_millis(),
+            "Session already exists, returning existing session"
+        );
     } else {
         // Create the session with resume option
-        sessions.create_session(session_id.clone(), cwd, config, Some(&meta))?;
+        tracing::debug!(
+            session_id = %session_id,
+            "Creating session with resume option"
+        );
+        sessions.create_session(session_id.clone(), cwd.clone(), config, Some(&meta))?;
+        
+        let elapsed = start_time.elapsed();
+        tracing::info!(
+            session_id = %session_id,
+            elapsed_ms = elapsed.as_millis(),
+            "Session loaded and created successfully"
+        );
     }
 
     // Build available modes (same as new session)
     let available_modes = build_available_modes();
     let mode_state = SessionModeState::new("default", available_modes);
-
-    tracing::info!("Session {} loaded successfully", session_id);
 
     Ok(LoadSessionResponse::new().modes(mode_state))
 }
@@ -155,15 +227,30 @@ fn build_available_modes() -> Vec<SessionMode> {
 /// Handle session/prompt request
 ///
 /// Sends the prompt to Claude and streams responses back as notifications.
-#[tracing::instrument(skip(request, _config, sessions, connection_cx), fields(session_id = %request.session_id.0))]
+#[instrument(
+    name = "acp_prompt",
+    skip(request, _config, sessions, connection_cx),
+    fields(
+        session_id = %request.session_id.0,
+        prompt_blocks = request.prompt.len(),
+    )
+)]
 pub async fn handle_prompt(
     request: PromptRequest,
     _config: &AgentConfig,
     sessions: &Arc<SessionManager>,
     connection_cx: JrConnectionCx<AgentToClient>,
 ) -> Result<PromptResponse, AgentError> {
+    let prompt_start = Instant::now();
+    
     let session_id = request.session_id.0.as_ref();
     let session = sessions.get_session_or_error(session_id)?;
+
+    tracing::info!(
+        session_id = %session_id,
+        prompt_blocks = request.prompt.len(),
+        "Starting prompt processing"
+    );
 
     // Configure ACP MCP server with connection and terminal client
     // This enables tools like Bash to send terminal updates
@@ -177,7 +264,18 @@ pub async fn handle_prompt(
 
     // Connect if not already connected
     if !session.is_connected() {
+        let connect_start = Instant::now();
+        tracing::debug!(
+            session_id = %session_id,
+            "Connecting to Claude CLI"
+        );
         session.connect().await?;
+        let connect_elapsed = connect_start.elapsed();
+        tracing::info!(
+            session_id = %session_id,
+            connect_elapsed_ms = connect_elapsed.as_millis(),
+            "Connected to Claude CLI"
+        );
     }
 
     // Reset cancelled flag for new prompt
@@ -185,10 +283,17 @@ pub async fn handle_prompt(
 
     // Extract text from prompt content blocks
     let query_text = extract_text_from_content(&request.prompt);
+    let query_preview = query_text.chars().take(200).collect::<String>();
 
-    tracing::info!("Received prompt for session {}: {}", session_id, query_text);
+    tracing::info!(
+        session_id = %session_id,
+        query_len = query_text.len(),
+        query_preview = %query_preview,
+        "Sending query to Claude CLI"
+    );
 
     // Get mutable client access and send the query
+    let query_start = Instant::now();
     {
         let mut client = session.client_mut().await;
 
@@ -200,38 +305,93 @@ pub async fn handle_prompt(
                 .map_err(AgentError::from)?;
         }
     }
+    let query_elapsed = query_start.elapsed();
+    tracing::debug!(
+        session_id = %session_id,
+        query_elapsed_ms = query_elapsed.as_millis(),
+        "Query sent to Claude CLI"
+    );
 
     // Get read access to client for streaming responses
     let client = session.client().await;
     let mut stream = client.receive_response();
     let converter = session.converter();
 
+    // Track streaming statistics
+    let mut message_count = 0u64;
+    let mut notification_count = 0u64;
+    let mut error_count = 0u64;
+
     // Process streaming responses
+    let stream_start = Instant::now();
     while let Some(result) = stream.next().await {
         // Check if cancelled
         if session.is_cancelled() {
-            tracing::info!("Prompt cancelled for session {}", session_id);
+            let elapsed = prompt_start.elapsed();
+            tracing::info!(
+                session_id = %session_id,
+                elapsed_ms = elapsed.as_millis(),
+                message_count = message_count,
+                notification_count = notification_count,
+                "Prompt cancelled by user"
+            );
             return Ok(PromptResponse::new(StopReason::EndTurn));
         }
 
         match result {
             Ok(message) => {
+                message_count += 1;
+                
                 // Convert SDK message to ACP notifications
                 let notifications = converter.convert_message(&message, session_id);
+                let batch_size = notifications.len();
 
                 // Send each notification
                 for notification in notifications {
+                    notification_count += 1;
                     if let Err(e) = send_notification(&connection_cx, notification) {
-                        tracing::warn!("Failed to send notification: {}", e);
+                        error_count += 1;
+                        tracing::warn!(
+                            session_id = %session_id,
+                            error = %e,
+                            "Failed to send notification"
+                        );
                     }
                 }
+                
+                tracing::trace!(
+                    session_id = %session_id,
+                    message_count = message_count,
+                    batch_size = batch_size,
+                    "Processed message from Claude CLI"
+                );
             }
             Err(e) => {
-                tracing::error!("Error receiving message: {}", e);
+                error_count += 1;
+                tracing::error!(
+                    session_id = %session_id,
+                    error = %e,
+                    message_count = message_count,
+                    "Error receiving message from Claude CLI"
+                );
                 // Continue processing - don't fail on individual message errors
             }
         }
     }
+
+    let stream_elapsed = stream_start.elapsed();
+    let total_elapsed = prompt_start.elapsed();
+    
+    tracing::info!(
+        session_id = %session_id,
+        total_elapsed_ms = total_elapsed.as_millis(),
+        stream_elapsed_ms = stream_elapsed.as_millis(),
+        query_elapsed_ms = query_elapsed.as_millis(),
+        message_count = message_count,
+        notification_count = notification_count,
+        error_count = error_count,
+        "Prompt completed"
+    );
 
     // Build response - ACP PromptResponse just has stop_reason
     Ok(PromptResponse::new(StopReason::EndTurn))
@@ -248,19 +408,43 @@ fn send_notification(
 /// Handle session/setMode request
 ///
 /// Sets the permission mode for the session and sends a CurrentModeUpdate notification.
-#[tracing::instrument(skip(request, sessions, connection_cx), fields(session_id = %request.session_id.0, mode_id = %request.mode_id.0))]
+#[instrument(
+    name = "acp_set_mode",
+    skip(request, sessions, connection_cx),
+    fields(
+        session_id = %request.session_id.0,
+        mode_id = %request.mode_id.0,
+    )
+)]
 pub async fn handle_set_mode(
     request: SetSessionModeRequest,
     sessions: &Arc<SessionManager>,
     connection_cx: JrConnectionCx<AgentToClient>,
 ) -> Result<SetSessionModeResponse, AgentError> {
     let session_id_str = request.session_id.0.as_ref();
+    let mode_id_str = request.mode_id.0.as_ref();
+    
+    tracing::info!(
+        session_id = %session_id_str,
+        mode_id = %mode_id_str,
+        "Setting session mode"
+    );
+
     let session = sessions.get_session_or_error(session_id_str)?;
 
+    // Get previous mode for logging
+    let previous_mode = session.permission_mode().await;
+
     // Parse the mode from mode_id
-    let mode_id_str = request.mode_id.0.as_ref();
     let mode = PermissionMode::parse(mode_id_str)
-        .ok_or_else(|| AgentError::InvalidMode(mode_id_str.to_string()))?;
+        .ok_or_else(|| {
+            tracing::warn!(
+                session_id = %session_id_str,
+                mode_id = %mode_id_str,
+                "Invalid mode ID"
+            );
+            AgentError::InvalidMode(mode_id_str.to_string())
+        })?;
 
     // Set the mode
     session.set_permission_mode(mode).await;
@@ -273,13 +457,18 @@ pub async fn handle_set_mode(
     );
 
     if let Err(e) = connection_cx.send_notification(notification) {
-        tracing::warn!("Failed to send CurrentModeUpdate notification: {}", e);
+        tracing::warn!(
+            session_id = %session_id_str,
+            error = %e,
+            "Failed to send CurrentModeUpdate notification"
+        );
     }
 
     tracing::info!(
-        "Mode changed for session {}: {}",
-        session_id_str,
-        mode_id_str
+        session_id = %session_id_str,
+        previous_mode = ?previous_mode,
+        new_mode = %mode_id_str,
+        "Session mode changed successfully"
     );
 
     Ok(SetSessionModeResponse::new())
@@ -289,10 +478,25 @@ pub async fn handle_set_mode(
 ///
 /// Called when a cancel notification is received.
 /// Sends an interrupt signal to Claude CLI to stop the current operation.
-#[tracing::instrument(skip(sessions))]
+#[instrument(
+    name = "acp_cancel",
+    skip(sessions),
+    fields(session_id = %session_id)
+)]
 pub async fn handle_cancel(session_id: &str, sessions: &Arc<SessionManager>) -> Result<(), AgentError> {
+    tracing::info!(
+        session_id = %session_id,
+        "Cancelling session"
+    );
+    
     let session = sessions.get_session_or_error(session_id)?;
     session.cancel().await;
+    
+    tracing::info!(
+        session_id = %session_id,
+        "Session cancellation completed"
+    );
+    
     Ok(())
 }
 
