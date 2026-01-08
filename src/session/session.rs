@@ -15,6 +15,7 @@ use claude_code_agent_sdk::{
 };
 use claude_code_agent_sdk::types::mcp::McpSdkServerConfig;
 use sacp::link::AgentToClient;
+use sacp::schema::McpServer;
 use sacp::JrConnectionCx;
 use tokio::sync::RwLock;
 use tracing::instrument;
@@ -83,6 +84,10 @@ pub struct Session {
     acp_mcp_server: Arc<AcpMcpServer>,
     /// Background process manager
     background_processes: Arc<BackgroundProcessManager>,
+    /// External MCP servers to connect (from client request)
+    external_mcp_servers: RwLock<Vec<McpServer>>,
+    /// Whether external MCP servers have been connected
+    external_mcp_connected: AtomicBool,
 }
 
 impl Session {
@@ -277,7 +282,197 @@ impl Session {
             current_model: RwLock::new(None),
             acp_mcp_server,
             background_processes,
+            external_mcp_servers: RwLock::new(Vec::new()),
+            external_mcp_connected: AtomicBool::new(false),
         })
+    }
+    
+    /// Set external MCP servers to connect
+    ///
+    /// # Arguments
+    ///
+    /// * `servers` - List of MCP servers from the client request
+    pub async fn set_external_mcp_servers(&self, servers: Vec<McpServer>) {
+        if !servers.is_empty() {
+            tracing::info!(
+                session_id = %self.session_id,
+                server_count = servers.len(),
+                "Storing external MCP servers for later connection"
+            );
+            
+        for server in &servers {
+            match server {
+                McpServer::Stdio(s) => {
+                    tracing::debug!(
+                        session_id = %self.session_id,
+                        server_name = %s.name,
+                        command = ?s.command,
+                        args = ?s.args,
+                        "External MCP server (stdio)"
+                    );
+                }
+                McpServer::Http(s) => {
+                    tracing::debug!(
+                        session_id = %self.session_id,
+                        server_name = %s.name,
+                        url = %s.url,
+                        "External MCP server (http)"
+                    );
+                }
+                McpServer::Sse(s) => {
+                    tracing::debug!(
+                        session_id = %self.session_id,
+                        server_name = %s.name,
+                        url = %s.url,
+                        "External MCP server (sse)"
+                    );
+                }
+                _ => {
+                    tracing::debug!(
+                        session_id = %self.session_id,
+                        "External MCP server (unknown type)"
+                    );
+                }
+            }
+        }
+        }
+        
+        *self.external_mcp_servers.write().await = servers;
+    }
+    
+    /// Connect to external MCP servers
+    ///
+    /// This should be called before the first prompt to ensure all
+    /// external MCP tools are available.
+    #[instrument(
+        name = "connect_external_mcp_servers",
+        skip(self),
+        fields(session_id = %self.session_id)
+    )]
+    pub async fn connect_external_mcp_servers(&self) -> Result<()> {
+        // Only connect once
+        if self.external_mcp_connected.load(Ordering::SeqCst) {
+            tracing::debug!(
+                session_id = %self.session_id,
+                "External MCP servers already connected"
+            );
+            return Ok(());
+        }
+        
+        let servers = self.external_mcp_servers.read().await;
+        if servers.is_empty() {
+            tracing::debug!(
+                session_id = %self.session_id,
+                "No external MCP servers to connect"
+            );
+            self.external_mcp_connected.store(true, Ordering::SeqCst);
+            return Ok(());
+        }
+        
+        let server_count = servers.len();
+        let start_time = Instant::now();
+        
+        tracing::info!(
+            session_id = %self.session_id,
+            server_count = server_count,
+            "Connecting to external MCP servers"
+        );
+        
+        let external_manager = self.acp_mcp_server.mcp_server().external_manager();
+        
+        let mut success_count = 0;
+        let mut error_count = 0;
+        
+        for server in servers.iter() {
+            match server {
+                McpServer::Stdio(s) => {
+                    let server_start = Instant::now();
+                    
+                    tracing::info!(
+                        session_id = %self.session_id,
+                        server_name = %s.name,
+                        command = ?s.command,
+                        args = ?s.args,
+                        "Connecting to external MCP server (stdio)"
+                    );
+                    
+                    // Convert env variables
+                    let env: Option<HashMap<String, String>> = if s.env.is_empty() {
+                        None
+                    } else {
+                        Some(s.env.iter().map(|e| (e.name.clone(), e.value.clone())).collect())
+                    };
+                    
+                    match external_manager
+                        .connect(
+                            s.name.clone(),
+                            s.command.to_string_lossy().as_ref(),
+                            &s.args,
+                            env.as_ref(),
+                            Some(self.cwd.as_path()),
+                        )
+                        .await
+                    {
+                        Ok(_) => {
+                            success_count += 1;
+                            let elapsed = server_start.elapsed();
+                            tracing::info!(
+                                session_id = %self.session_id,
+                                server_name = %s.name,
+                                elapsed_ms = elapsed.as_millis(),
+                                "Successfully connected to external MCP server"
+                            );
+                        }
+                        Err(e) => {
+                            error_count += 1;
+                            let elapsed = server_start.elapsed();
+                            tracing::error!(
+                                session_id = %self.session_id,
+                                server_name = %s.name,
+                                error = %e,
+                                elapsed_ms = elapsed.as_millis(),
+                                "Failed to connect to external MCP server"
+                            );
+                        }
+                    }
+                }
+                McpServer::Http(s) => {
+                    tracing::warn!(
+                        session_id = %self.session_id,
+                        server_name = %s.name,
+                        url = %s.url,
+                        "HTTP MCP servers not yet supported"
+                    );
+                }
+                McpServer::Sse(s) => {
+                    tracing::warn!(
+                        session_id = %self.session_id,
+                        server_name = %s.name,
+                        url = %s.url,
+                        "SSE MCP servers not yet supported"
+                    );
+                }
+                _ => {
+                    tracing::warn!(
+                        session_id = %self.session_id,
+                        "Unknown MCP server type - not supported"
+                    );
+                }
+            }
+        }
+        
+        let total_elapsed = start_time.elapsed();
+        tracing::info!(
+            session_id = %self.session_id,
+            total_servers = server_count,
+            success_count = success_count,
+            error_count = error_count,
+            total_elapsed_ms = total_elapsed.as_millis(),
+            "Finished connecting external MCP servers"
+        );
+        
+        self.external_mcp_connected.store(true, Ordering::SeqCst);
+        Ok(())
     }
 
     /// Connect to Claude CLI

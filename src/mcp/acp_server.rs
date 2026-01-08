@@ -402,45 +402,52 @@ impl AcpMcpServer {
         
         let context = self.create_tool_context(tool_use_id).await;
 
-        // Special handling for Bash tool - send terminal update after terminal creation
-        let result = if tool_name == "Bash" {
-            self.execute_bash_tool(arguments, tool_use_id, &context).await
-        } else {
-            // Execute other tools normally
-            let result = self.mcp_server.execute(tool_name, arguments, &context).await;
-            Ok(result)
-        };
-        
+        // Special handling for Bash tool - use early return to match original behavior
+        if tool_name == "Bash" {
+            let result = self.execute_bash_tool(arguments, tool_use_id, &context).await;
+            let elapsed = start_time.elapsed();
+            match &result {
+                Ok(r) => {
+                    tracing::info!(
+                        tool_name = %tool_name,
+                        elapsed_ms = elapsed.as_millis(),
+                        is_error = r.is_error,
+                        content_len = r.content.len(),
+                        "ACP Bash tool completed"
+                    );
+                }
+                Err(e) => {
+                    tracing::error!(
+                        tool_name = %tool_name,
+                        elapsed_ms = elapsed.as_millis(),
+                        error = %e,
+                        "ACP Bash tool failed"
+                    );
+                }
+            }
+            return result;
+        }
+
+        // Execute other tools normally
+        let result = self.mcp_server.execute(tool_name, arguments, &context).await;
         let elapsed = start_time.elapsed();
         
-        match &result {
-            Ok(r) => {
-                let content_preview = if r.content.len() > 300 {
-                    format!("{}...(truncated)", &r.content[..300])
-                } else {
-                    r.content.clone()
-                };
-                
-                tracing::info!(
-                    tool_name = %tool_name,
-                    elapsed_ms = elapsed.as_millis(),
-                    is_error = r.is_error,
-                    content_len = r.content.len(),
-                    content_preview = %content_preview,
-                    "ACP tool completed"
-                );
-            }
-            Err(e) => {
-                tracing::error!(
-                    tool_name = %tool_name,
-                    elapsed_ms = elapsed.as_millis(),
-                    error = %e,
-                    "ACP tool execution failed"
-                );
-            }
-        }
+        let content_preview = if result.content.len() > 300 {
+            format!("{}...(truncated)", &result.content[..300])
+        } else {
+            result.content.clone()
+        };
         
-        result
+        tracing::info!(
+            tool_name = %tool_name,
+            elapsed_ms = elapsed.as_millis(),
+            is_error = result.is_error,
+            content_len = result.content.len(),
+            content_preview = %content_preview,
+            "ACP tool completed"
+        );
+        
+        Ok(result)
     }
 
     /// Execute Bash tool with streaming output via meta field

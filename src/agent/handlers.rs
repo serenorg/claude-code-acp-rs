@@ -80,9 +80,10 @@ pub fn handle_initialize(
     fields(
         cwd = ?request.cwd,
         has_meta = request.meta.is_some(),
+        mcp_server_count = request.mcp_servers.len(),
     )
 )]
-pub fn handle_new_session(
+pub async fn handle_new_session(
     request: NewSessionRequest,
     config: &AgentConfig,
     sessions: &Arc<SessionManager>,
@@ -92,8 +93,22 @@ pub fn handle_new_session(
     tracing::info!(
         cwd = ?request.cwd,
         has_meta = request.meta.is_some(),
+        mcp_server_count = request.mcp_servers.len(),
         "Creating new ACP session"
     );
+    
+    // Log external MCP servers from client
+    if !request.mcp_servers.is_empty() {
+        tracing::info!(
+            mcp_servers = ?request.mcp_servers.iter().map(|s| match s {
+                sacp::schema::McpServer::Stdio(stdio) => format!("{}(stdio:{})", stdio.name, stdio.command.display()),
+                sacp::schema::McpServer::Http(http) => format!("{}(http:{})", http.name, http.url),
+                sacp::schema::McpServer::Sse(sse) => format!("{}(sse:{})", sse.name, sse.url),
+                _ => format!("unknown"),
+            }).collect::<Vec<_>>(),
+            "External MCP servers from client"
+        );
+    }
 
     // Parse metadata from request if present
     let meta = request.meta.as_ref().and_then(|m| {
@@ -114,7 +129,12 @@ pub fn handle_new_session(
     );
 
     // Create the session
-    sessions.create_session(session_id.clone(), cwd.clone(), config, meta.as_ref())?;
+    let session = sessions.create_session(session_id.clone(), cwd.clone(), config, meta.as_ref())?;
+    
+    // Store external MCP servers for later connection
+    if !request.mcp_servers.is_empty() {
+        session.set_external_mcp_servers(request.mcp_servers).await;
+    }
 
     // Build available modes
     let available_modes = build_available_modes();
@@ -261,6 +281,26 @@ pub async fn handle_prompt(
     session
         .configure_acp_server(connection_cx.clone(), Some(terminal_client))
         .await;
+
+    // Connect external MCP servers first (if any)
+    // This ensures external tools are available when Claude CLI starts
+    let external_mcp_start = Instant::now();
+    if let Err(e) = session.connect_external_mcp_servers().await {
+        tracing::error!(
+            session_id = %session_id,
+            error = %e,
+            "Error connecting to external MCP servers"
+        );
+        // Continue anyway - external MCP failures shouldn't block the session
+    }
+    let external_mcp_elapsed = external_mcp_start.elapsed();
+    if external_mcp_elapsed.as_millis() > 0 {
+        tracing::debug!(
+            session_id = %session_id,
+            external_mcp_elapsed_ms = external_mcp_elapsed.as_millis(),
+            "External MCP servers connection completed"
+        );
+    }
 
     // Connect if not already connected
     if !session.is_connected() {
@@ -531,13 +571,13 @@ mod tests {
         assert_eq!(response.protocol_version, ProtocolVersion::LATEST);
     }
 
-    #[test]
-    fn test_handle_new_session() {
+    #[tokio::test]
+    async fn test_handle_new_session() {
         let request = NewSessionRequest::new(PathBuf::from("/tmp"));
         let config = AgentConfig::from_env();
         let sessions = Arc::new(SessionManager::new());
 
-        let response = handle_new_session(request, &config, &sessions).unwrap();
+        let response = handle_new_session(request, &config, &sessions).await.unwrap();
 
         assert!(!response.session_id.0.is_empty());
         assert!(sessions.has_session(&response.session_id.0));

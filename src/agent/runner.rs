@@ -333,7 +333,7 @@ async fn run_acp_server() -> Result<(), sacp::Error> {
                 let sessions = sessions.clone();
                 async move |request: NewSessionRequest, request_cx, _connection_cx| {
                     tracing::debug!("Received session/new request");
-                    match handlers::handle_new_session(request, &config, &sessions) {
+                    match handlers::handle_new_session(request, &config, &sessions).await {
                         Ok(response) => request_cx.respond(response),
                         Err(e) => request_cx.respond_with_error(sacp::util::internal_error(e.to_string())),
                     }
