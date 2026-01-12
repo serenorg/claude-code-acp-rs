@@ -499,6 +499,21 @@ pub async fn handle_prompt(
         "Prompt completed"
     );
 
+    // Ensure all notifications are sent before returning EndTurn.
+    // This works around a race condition where EndTurn response can arrive
+    // before pending agent_message_chunk notifications are processed.
+    //
+    // The issue: send_notification() uses unbounded_send() which returns
+    // immediately, but the outgoing_protocol_actor processes messages
+    // asynchronously in the background.
+    //
+    // Solution: Wait based on the number of notifications sent.
+    // - More notifications = longer wait to ensure all are processed
+    // - Minimum 10ms for small notification counts
+    // - Maximum 100ms to avoid excessive delay
+    let wait_ms = (10 + notification_count.saturating_mul(2)).min(100);
+    tokio::time::sleep(tokio::time::Duration::from_millis(wait_ms as u64)).await;
+
     // Build response - ACP PromptResponse just has stop_reason
     Ok(PromptResponse::new(StopReason::EndTurn))
 }

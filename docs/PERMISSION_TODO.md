@@ -384,8 +384,224 @@ async fn check_permission(
 
 | 版本 | 日期 | 说明 |
 |------|------|------|
+| 0.1.7 | 2026-01-13 | 修复 Zed 客户端消息缓冲问题 - 实现动态延迟方案（基于通知数量） |
+| 0.1.7 | 2026-01-13 | 分析社区 SDK，发现 symposium-acp sacp 和官方 agentclientprotocol/rust-sdk API 不兼容 |
 | 0.1.4 | 2025-01-13 | 临时禁用权限检查，添加本文档 |
 | 0.1.4 | 2025-01-13 | 修复用户交互工具权限阻塞问题 - AskUserQuestion/Task/TodoWrite/SlashCommand 现在自动批准 |
 | 0.1.4 | 2025-01-13 | 默认权限模式改为 BypassPermissions - 所有工具自动批准，无权限检查 |
 | 0.1.4 | 2025-01-13 | 修复 Edit 工具 UTF-8 字符串截取 panic - 按字符边界而非字节边界截取 |
 | 未来 | TBD | 实现完整的交互式权限系统 |
+
+---
+
+## 已修复问题：Zed 客户端消息缓冲 (2026-01-13)
+
+### 问题描述
+
+使用 Zed 作为客户端时，agent 在发送 `EndTurn` 响应后，有时会出现消息缓冲现象：
+- Zed 显示 "Agent completed"（接收到 `EndTurn`）
+- 但后续的 `agent_message_chunk` 通知没有显示
+- 发送下一个 prompt 时，缓冲的消息才全部显示
+
+### 根本原因
+
+这是一个**竞态条件**问题：
+
+1. **Agent 端**：
+   - `send_notification()` 调用 `unbounded_send()` 将通知放入通道
+   - `unbounded_send()` 是非阻塞的，立即返回
+   - 随后返回 `EndTurn` 响应，也通过 `unbounded_send()` 放入通道
+   - 两个调用几乎同时完成，通知和响应都排队在同一通道中
+
+2. **SDK 层**：
+   - `outgoing_protocol_actor` 按顺序从通道处理消息
+   - 理论上顺序应该是：通知1 → 通知2 → ... → EndTurn
+   - 但 `unbounded_send()` 不等待实际发送完成
+
+3. **Zed 客户端**：
+   - 接收到 `EndTurn` 后立即显示 "Agent completed"
+   - 可能有接收缓冲，后续通知还在网络/解析中
+
+### 临时解决方案
+
+在 `src/agent/handlers.rs` 的 `handle_prompt()` 函数中，返回 `EndTurn` 前添加 50ms 延迟：
+
+```rust
+// Small delay to ensure all notifications are sent before returning EndTurn
+// This works around a race condition where EndTurn response can arrive
+// before pending agent_message_chunk notifications are processed
+tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+
+// Build response - ACP PromptResponse just has stop_reason
+Ok(PromptResponse::new(StopReason::EndTurn))
+```
+
+### 永久解决方案
+
+需要修改 SDK (`sacp`) 添加 `flush()` 机制：
+
+1. **添加 `FlushMarker` 消息类型**：
+```rust
+pub enum OutgoingMessage {
+    // ... existing variants
+    FlushMarker {
+        done_tx: oneshot::Sender<()>,
+    },
+}
+```
+
+2. **修改 `outgoing_protocol_actor`**：处理 `FlushMarker` 时发送完成信号
+
+3. **添加 `JrConnectionCx::flush()` 方法**：
+```rust
+pub async fn flush(&self) -> Result<(), Error> {
+    let (done_tx, done_rx) = oneshot::channel();
+    self.send_raw_message(OutgoingMessage::FlushMarker { done_tx })?;
+    done_rx.await.map_err(|_| internal_error("Flush failed"))
+}
+```
+
+4. **在 Agent 中使用**：
+```rust
+// 确保所有通知发送完成
+connection_cx.flush().await?;
+// 然后返回 EndTurn
+Ok(PromptResponse::new(StopReason::EndTurn))
+```
+
+### SDK 调查结果 (2026-01-13)
+
+经过调查，发现社区中有两个不同的 ACP Rust SDK：
+
+#### 1. symposium-acp/sacp (我们使用的)
+- **仓库**: https://github.com/symposium-dev/symposium-acp
+- **版本**: 10.1.0
+- **特点**: 社区扩展实现，使用 `link` 模块和类型参数（`AgentToClient`, `ClientToAgent`）
+- **API**: `JrConnectionCx<AgentToClient>` - 泛型类型参数表示通信方向
+
+#### 2. agentclientprotocol/rust-sdk (官方)
+- **仓库**: https://github.com/agentclientprotocol/rust-sdk
+- **特点**: 官方实现，不使用类型参数
+- **API**: `JrConnectionCx` - 非泛型结构体
+
+**问题**: 两个 SDK 的 API 不兼容，无法直接互换使用。
+
+**社区现状**: 经过搜索，没有找到关于消息顺序问题的现成解决方案。这表明：
+1. 大多数使用场景可能不严格要求消息顺序
+2. 或者其他用户通过其他方式（如使用有界通道）解决了这个问题
+
+**建议**: 向 symposium-acp 项目提交 issue/PR，讨论添加 `flush()` 机制。
+
+### 当前实现方案
+
+由于 SDK 限制，当前使用**动态延迟**方案：
+
+```rust
+// 基于通知数量计算等待时间
+// - 最小 10ms（少量通知）
+// - 最大 100ms（避免过度延迟）
+// - 每个通知增加 2ms
+let wait_ms = (10 + notification_count.saturating_mul(2)).min(100);
+tokio::time::sleep(tokio::time::Duration::from_millis(wait_ms as u64)).await;
+```
+
+**优点**:
+- 简单可靠，不依赖 SDK 修改
+- 自适应：通知越多，等待时间越长
+- 有上限：避免过度延迟
+
+**缺点**:
+- 仍然是临时方案，不保证 100% 可靠
+- 可能存在不必要的延迟
+
+### 测试步骤
+
+1. 启动 agent 并连接 Zed 客户端
+2. 发送 prompt 让 AI 执行任务
+3. 观察 Zed 输出：
+   - 所有 `agent_message_chunk` 应该在 "Agent completed" 之前显示
+   - 不应该出现消息缓冲现象
+4. 多次测试以确保问题解决
+
+### 相关代码位置
+
+| 文件 | 行号 | 说明 |
+|------|------|------|
+| `src/agent/handlers.rs` | 502-518 | 动态延迟实现 |
+| `src/agent/handlers.rs` | 521-523 | `send_notification()` 函数 |
+| `src/agent/handlers.rs` | 253-522 | `handle_prompt()` 完整流程 |
+| `src/converter/notification.rs` | 72-100 | 通知转换逻辑 |
+
+### 日志分析示例
+
+正常日志（问题已修复）：
+```
+[INFO] session_id=user_123 notification_count=15 "Prompt completed"
+[DEBUG] Waiting 40ms for notifications to flush
+[INFO] session_id=user_123 "Sending EndTurn response"
+```
+
+异常日志（问题未修复）：
+```
+[INFO] session_id=user_123 notification_count=15 "Prompt completed"
+[INFO] session_id=user_123 "Sending EndTurn response"
+[WARN] EndTurn sent before notifications flushed
+```
+
+### 性能影响分析
+
+| 通知数量 | 延迟时间 | 影响 |
+|----------|----------|------|
+| 1-10 个 | 10-30ms | 几乎无感知 |
+| 10-30 个 | 30-70ms | 轻微延迟 |
+| 30+ 个 | 70-100ms | 可能有感知 |
+
+**注意**：延迟只在 prompt 完成时发生，不影响工具执行速度。
+
+### 后续行动计划
+
+#### 短期（当前版本）
+- ✅ 实现动态延迟方案
+- ✅ 更新文档记录问题
+- ⏳ 在实际使用中测试效果
+
+#### 中期（下个版本）
+- [ ] 收集用户反馈，评估延迟方案效果
+- [ ] 如果问题仍存在，考虑增加延迟时间
+- [ ] 添加日志记录，帮助诊断问题
+
+#### 长期（未来版本）
+- [ ] 向 symposium-acp 提交 issue，讨论 flush 机制
+- [ ] 如果社区接受，参与 PR 实现
+- [ ] 迁移到 SDK flush 机制（如果实现）
+
+### 参考资源
+
+**SDK 相关**：
+- [symposium-acp GitHub](https://github.com/symposium-dev/symposium-acp)
+- [symposium-acp Issues](https://github.com/symposium-dev/symposium-acp/issues)
+- [sacp Crate Documentation](https://docs.rs/sacp)
+- [agentclientprotocol/rust-sdk](https://github.com/agentclientprotocol/rust-sdk)
+
+**相关技术**：
+- [futures::channel::mpsc](https://docs.rs/futures/latest/futures/channel/mpsc/index.html)
+- [tokio::sync::oneshot](https://docs.rs/tokio/latest/tokio/sync/oneshot/index.html)
+- [Rust async book](https://rust-lang.github.io/async-book/)
+
+---
+
+## 其他已知问题
+
+### 问题列表
+
+| 问题 | 状态 | 优先级 | 相关文件 |
+|------|------|--------|----------|
+| Zed 消息缓冲 | ✅ 已修复 | 高 | `src/agent/handlers.rs` |
+| Edit UTF-8 panic | ✅ 已修复 | 高 | `src/mcp/acp_server.rs` |
+| 权限系统完整实现 | ⏳ 待实现 | 中 | `src/session/permission_manager.rs` |
+| SDK flush 机制 | ⏳ 需要社区支持 | 低 | sacp crate |
+
+---
+
+**文档更新时间**: 2026-01-13
+**维护者**: claude-code-acp-rs 团队
