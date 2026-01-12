@@ -17,7 +17,6 @@ use claude_code_agent_sdk::PermissionMode as SdkPermissionMode;
 #[serde(rename_all = "camelCase")]
 pub enum PermissionMode {
     /// Default mode - prompt for dangerous operations
-    #[default]
     Default,
     /// Auto-approve file edits
     AcceptEdits,
@@ -25,7 +24,8 @@ pub enum PermissionMode {
     Plan,
     /// Don't ask mode - deny if not pre-approved
     DontAsk,
-    /// Bypass all permission checks (dangerous)
+    /// Bypass all permission checks (default mode for development)
+    #[default]
     BypassPermissions,
 }
 
@@ -110,7 +110,7 @@ pub struct PermissionHandler {
 impl Default for PermissionHandler {
     fn default() -> Self {
         Self {
-            mode: PermissionMode::Default,
+            mode: PermissionMode::BypassPermissions,
             checker: None,
         }
     }
@@ -133,7 +133,7 @@ impl PermissionHandler {
     /// Create with settings-based checker
     pub fn with_checker(checker: Arc<RwLock<PermissionChecker>>) -> Self {
         Self {
-            mode: PermissionMode::Default,
+            mode: PermissionMode::BypassPermissions,
             checker: Some(checker),
         }
     }
@@ -141,7 +141,7 @@ impl PermissionHandler {
     /// Create with settings-based checker (non-async, for convenience)
     pub fn with_checker_owned(checker: PermissionChecker) -> Self {
         Self {
-            mode: PermissionMode::Default,
+            mode: PermissionMode::BypassPermissions,
             checker: Some(Arc::new(RwLock::new(checker))),
         }
     }
@@ -258,6 +258,15 @@ impl PermissionHandler {
             }
         }
 
+        // User interaction tools should always be allowed
+        // These tools themselves facilitate user interaction and shouldn't be blocked
+        if matches!(
+            tool_name,
+            "AskUserQuestion" | "Task" | "TodoWrite" | "SlashCommand"
+        ) {
+            return ToolPermissionResult::Allowed;
+        }
+
         // Mode-based auto-approve
         if self.should_auto_approve(tool_name, tool_input) {
             return ToolPermissionResult::Allowed;
@@ -308,6 +317,19 @@ mod tests {
     #[test]
     fn test_permission_handler_default() {
         let handler = PermissionHandler::new();
+        let input = json!({});
+
+        // Default mode is now BypassPermissions - everything auto-approved
+        assert!(handler.should_auto_approve("Read", &input));
+        assert!(handler.should_auto_approve("Glob", &input));
+        assert!(handler.should_auto_approve("Edit", &input));
+        assert!(handler.should_auto_approve("Bash", &input));
+    }
+
+    #[test]
+    fn test_permission_handler_explicit_default_mode() {
+        // Test the old Default mode explicitly
+        let handler = PermissionHandler::with_mode(PermissionMode::Default);
         let input = json!({});
 
         // Default mode auto-approves reads

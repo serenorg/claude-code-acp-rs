@@ -319,6 +319,8 @@ dependencies = [
 [[package]]
 name = "claude-code-agent-sdk"
 version = "0.1.22"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f50a00a40945560cec8919d6c7b8823b6fb8de74844f4fec194810bc274186a7"
 dependencies = [
  "anyhow",
  "async-stream",

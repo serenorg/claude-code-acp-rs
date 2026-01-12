@@ -169,7 +169,8 @@ impl Session {
 
         // Create shared permission mode that can be updated at runtime
         // This is shared between the hook and the permission handler
-        let permission_mode = Arc::new(RwLock::new(PermissionMode::Default));
+        // Default to BypassPermissions to allow all tools without permission checks
+        let permission_mode = Arc::new(RwLock::new(PermissionMode::BypassPermissions));
 
         // Create shared connection_cx_lock for hook permission requests
         let connection_cx_lock: Arc<OnceLock<JrConnectionCx<AgentToClient>>> =
@@ -211,6 +212,7 @@ impl Session {
 
         // Create PermissionHandler with shared PermissionChecker
         // This ensures both pre_tool_use_hook and can_use_tool callback use the same rules
+        // PermissionHandler defaults to BypassPermissions mode (allow all tools)
         let permission_handler = Arc::new(RwLock::new(PermissionHandler::with_checker(
             permission_checker.clone(),
         )));
@@ -249,7 +251,7 @@ impl Session {
             .hooks(hooks_map)
             .mcp_servers(McpServers::Dict(mcp_servers_dict))
             .can_use_tool(can_use_tool_callback)
-            .permission_mode(SdkPermissionMode::Default)
+            .permission_mode(SdkPermissionMode::BypassPermissions)
             .build();
 
         // Debug: Verify can_use_tool is set
@@ -989,7 +991,7 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(session.permission_mode().await, PermissionMode::Default);
+        assert_eq!(session.permission_mode().await, PermissionMode::BypassPermissions);
         session
             .set_permission_mode(PermissionMode::AcceptEdits)
             .await;

@@ -348,7 +348,17 @@ async fn check_permission(
 
 ### 当前行为
 
-所有工具在 **Default 模式**下会直接执行，不会显示权限对话框。
+**默认权限模式**: `BypassPermissions` - 所有工具自动批准，无权限检查
+
+#### 用户交互工具（额外保障）
+以下工具在所有模式下**自动批准**，因为它们本身是用户交互的机制：
+- `AskUserQuestion` - AI 向用户提问
+- `Task` - 子任务执行
+- `TodoWrite` - 待办事项管理
+- `SlashCommand` - 斜杠命令执行
+
+#### 其他工具
+所有工具在 **BypassPermissions 模式**下自动批准，不会显示权限对话框。
 
 ### 如果需要限制工具执行
 
@@ -375,4 +385,7 @@ async fn check_permission(
 | 版本 | 日期 | 说明 |
 |------|------|------|
 | 0.1.4 | 2025-01-13 | 临时禁用权限检查，添加本文档 |
+| 0.1.4 | 2025-01-13 | 修复用户交互工具权限阻塞问题 - AskUserQuestion/Task/TodoWrite/SlashCommand 现在自动批准 |
+| 0.1.4 | 2025-01-13 | 默认权限模式改为 BypassPermissions - 所有工具自动批准，无权限检查 |
+| 0.1.4 | 2025-01-13 | 修复 Edit 工具 UTF-8 字符串截取 panic - 按字符边界而非字节边界截取 |
 | 未来 | TBD | 实现完整的交互式权限系统 |

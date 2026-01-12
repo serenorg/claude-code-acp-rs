@@ -396,6 +396,7 @@ impl AcpMcpServer {
             .get()
             .map(|s| s.as_str())
             .unwrap_or("unknown");
+
         let cwd = self.cwd.read().await;
         let terminal_client = self.terminal_client.get();
         let background_processes = self.background_processes.get();
@@ -447,8 +448,16 @@ impl AcpMcpServer {
 
         // Log arguments preview (truncated for large inputs)
         let args_str = arguments.to_string();
+
+        // Truncate at character boundary to avoid panic on multi-byte UTF-8
         let args_preview = if args_str.len() > 500 {
-            format!("{}...(truncated)", &args_str[..500])
+            // Find a safe character boundary near byte 500
+            let safe_boundary = args_str
+                .char_indices()
+                .map(|(i, _)| i)
+                .find(|&i| i > 500)
+                .unwrap_or(args_str.len());
+            format!("{}...(truncated)", &args_str[..safe_boundary])
         } else {
             args_str.clone()
         };
@@ -1067,9 +1076,6 @@ impl SdkMcpServer for AcpMcpServer {
                 );
 
                 let tool_start = Instant::now();
-
-                #[cfg(feature = "verbose-debug")]
-                tracing::debug!("About to call execute_tool");
 
                 let result = self
                     .execute_tool(tool_name, arguments, tool_use_id)
