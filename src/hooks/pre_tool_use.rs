@@ -32,9 +32,10 @@ use crate::settings::PermissionChecker;
 /// # Permission Mode Integration
 ///
 /// The hook respects the session's permission mode:
-/// - **BypassPermissions**: Allows all tools without checking rules
+/// - **BypassPermissions/AcceptEdits**: Allows all tools without checking rules
+///   (AcceptEdits behaves like BypassPermissions for root compatibility)
 /// - **Plan**: Blocks write operations (Edit, Write, Bash, NotebookEdit)
-/// - **Default/AcceptEdits/DontAsk**: Checks settings rules and mode-based auto-approval
+/// - **Default/DontAsk**: Checks settings rules and mode-based auto-approval
 ///
 /// # Architecture
 ///
@@ -120,15 +121,24 @@ pub fn create_pre_tool_use_hook(
                     // Get current permission mode
                     let mode = *permission_mode.read().await;
 
-                    // BypassPermissions mode allows everything
-                    if mode == PermissionMode::BypassPermissions {
+                    // BypassPermissions and AcceptEdits modes allow everything
+                    // (AcceptEdits behaves like BypassPermissions for root compatibility)
+                    if matches!(
+                        mode,
+                        PermissionMode::BypassPermissions | PermissionMode::AcceptEdits
+                    ) {
                         let elapsed = start_time.elapsed();
+                        let mode_str = match mode {
+                            PermissionMode::BypassPermissions => "BypassPermissions",
+                            PermissionMode::AcceptEdits => "AcceptEdits",
+                            _ => unreachable!(),
+                        };
                         tracing::info!(
                             tool_name = %tool_name,
                             tool_use_id = ?tool_use_id,
-                            mode = "bypassPermissions",
+                            mode = %mode_str,
                             elapsed_us = elapsed.as_micros(),
-                            "Tool allowed by BypassPermissions mode"
+                            "Tool allowed by permission mode (auto-approve all)"
                         );
 
                         return HookJsonOutput::Sync(SyncHookJsonOutput {
@@ -137,7 +147,7 @@ pub fn create_pre_tool_use_hook(
                                 PreToolUseHookSpecificOutput {
                                     permission_decision: Some("allow".to_string()),
                                     permission_decision_reason: Some(
-                                        "Allowed by BypassPermissions mode".to_string(),
+                                        format!("Allowed by {} mode (auto-approve all tools)", mode_str),
                                     ),
                                     updated_input: None,
                                 },

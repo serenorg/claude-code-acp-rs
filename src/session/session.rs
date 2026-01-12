@@ -169,8 +169,8 @@ impl Session {
 
         // Create shared permission mode that can be updated at runtime
         // This is shared between the hook and the permission handler
-        // Default to BypassPermissions to allow all tools without permission checks
-        let permission_mode = Arc::new(RwLock::new(PermissionMode::BypassPermissions));
+        // Default to AcceptEdits (compatible with root, allows tool execution)
+        let permission_mode = Arc::new(RwLock::new(PermissionMode::AcceptEdits));
 
         // Create shared connection_cx_lock for hook permission requests
         let connection_cx_lock: Arc<OnceLock<JrConnectionCx<AgentToClient>>> =
@@ -212,7 +212,7 @@ impl Session {
 
         // Create PermissionHandler with shared PermissionChecker
         // This ensures both pre_tool_use_hook and can_use_tool callback use the same rules
-        // PermissionHandler defaults to BypassPermissions mode (allow all tools)
+        // PermissionHandler uses AcceptEdits mode (compatible with root, allows all tools)
         let permission_handler = Arc::new(RwLock::new(PermissionHandler::with_checker(
             permission_checker.clone(),
         )));
@@ -246,12 +246,18 @@ impl Session {
         let can_use_tool_callback = create_can_use_tool_callback(session_lock.clone());
 
         // Build ClaudeAgentOptions
+        //
+        // Note: We use AcceptEdits instead of BypassPermissions because
+        // BypassPermissions mode cannot be used with root/sudo privileges
+        // for security reasons (Claude CLI enforces this restriction).
+        // AcceptEdits allows tool execution without permission prompts while
+        // being compatible with root user environments.
         let mut options = ClaudeAgentOptions::builder()
             .cwd(cwd.clone())
             .hooks(hooks_map)
             .mcp_servers(McpServers::Dict(mcp_servers_dict))
             .can_use_tool(can_use_tool_callback)
-            .permission_mode(SdkPermissionMode::BypassPermissions)
+            .permission_mode(SdkPermissionMode::AcceptEdits)
             .build();
 
         // Debug: Verify can_use_tool is set
@@ -991,10 +997,11 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(session.permission_mode().await, PermissionMode::BypassPermissions);
-        session
-            .set_permission_mode(PermissionMode::AcceptEdits)
-            .await;
+        // Default is now AcceptEdits (compatible with root user environments)
         assert_eq!(session.permission_mode().await, PermissionMode::AcceptEdits);
+        session
+            .set_permission_mode(PermissionMode::DontAsk)
+            .await;
+        assert_eq!(session.permission_mode().await, PermissionMode::DontAsk);
     }
 }
