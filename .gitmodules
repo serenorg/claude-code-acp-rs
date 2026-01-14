@@ -19,3 +19,6 @@
 [submodule "vendors/symposium-acp"]
 	path = vendors/symposium-acp
 	url = https://github.com/symposium-dev/symposium-acp.git
+[submodule "vendors/claude-code-agent-sdk"]
+	path = vendors/claude-code-agent-sdk
+	url = https://github.com/soddygo/claude-code-agent-sdk.git
