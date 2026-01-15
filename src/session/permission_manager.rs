@@ -50,7 +50,7 @@ pub struct PendingPermissionRequest {
 ///
 /// # Example
 ///
-/// ```rust
+/// ```rust,ignore
 /// let manager = PermissionManager::new(connection_cx);
 /// let rx = manager.request_permission("Edit", input, "call_123", "session_456");
 /// let decision = rx.await?;
@@ -60,6 +60,9 @@ pub struct PermissionManager {
     pending_requests: tokio::sync::mpsc::UnboundedSender<PendingPermissionRequest>,
 
     /// Connection to client for sending permission requests
+    /// Note: Currently used by `send_permission_request_to_client` which is prepared
+    /// for future interactive permission dialog implementation.
+    #[allow(dead_code)]
     connection_cx: Arc<JrConnectionCx<AgentToClient>>,
 }
 
@@ -141,6 +144,10 @@ impl PermissionManager {
     }
 
     /// Send permission request to client via SACP
+    ///
+    /// Note: This method is prepared for future interactive permission dialog implementation.
+    /// Currently, permission requests are handled by the SDK's `can_use_tool` callback.
+    #[allow(dead_code)]
     async fn send_permission_request_to_client(
         &self,
         tool_name: &str,
@@ -193,6 +200,9 @@ impl PermissionManager {
 }
 
 /// Parse a permission response outcome into our decision type
+///
+/// Note: Prepared for future interactive permission dialog implementation.
+#[allow(dead_code)]
 fn parse_permission_response(outcome: RequestPermissionOutcome) -> PermissionManagerDecision {
     match outcome {
         RequestPermissionOutcome::Selected(selected) => {
@@ -210,6 +220,9 @@ fn parse_permission_response(outcome: RequestPermissionOutcome) -> PermissionMan
 }
 
 /// Format a title for the permission dialog based on tool name and input
+///
+/// Note: Prepared for future interactive permission dialog implementation.
+#[allow(dead_code)]
 fn format_tool_title(tool_name: &str, input: &serde_json::Value) -> String {
     // Strip mcp__acp__ prefix for display
     let display_name = tool_name.strip_prefix("mcp__acp__").unwrap_or(tool_name);
@@ -247,6 +260,9 @@ fn format_tool_title(tool_name: &str, input: &serde_json::Value) -> String {
 }
 
 /// Truncate a string to max length, adding "..." if truncated
+///
+/// Note: Prepared for future interactive permission dialog implementation.
+#[allow(dead_code)]
 fn truncate_string(s: &str, max_len: usize) -> String {
     if s.len() <= max_len {
         s.to_string()

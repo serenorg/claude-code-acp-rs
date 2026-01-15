@@ -22,3 +22,6 @@
 [submodule "vendors/claude-code-agent-sdk"]
 	path = vendors/claude-code-agent-sdk
 	url = https://github.com/soddygo/claude-code-agent-sdk.git
+[submodule "vendors/codex"]
+	path = vendors/codex
+	url = https://github.com/openai/codex.git

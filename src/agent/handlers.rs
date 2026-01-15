@@ -364,7 +364,7 @@ pub async fn handle_prompt(
     loop {
         // Check for cancel signal from MCP cancellation notification
         match cancel_rx.try_recv() {
-            Ok(_) => {
+            Ok(()) => {
                 tracing::info!(
                     session_id = %session_id,
                     "Cancel signal received from MCP notification, interrupting CLI"
@@ -480,7 +480,6 @@ pub async fn handle_prompt(
             }
             Err(_) => {
                 // Timeout - continue loop to check cancel signal again
-                continue;
             }
         }
     }
@@ -512,7 +511,7 @@ pub async fn handle_prompt(
     // - Minimum 10ms for small notification counts
     // - Maximum 100ms to avoid excessive delay
     let wait_ms = (10 + notification_count.saturating_mul(2)).min(100);
-    tokio::time::sleep(tokio::time::Duration::from_millis(wait_ms as u64)).await;
+    tokio::time::sleep(tokio::time::Duration::from_millis(wait_ms)).await;
 
     // Build response - ACP PromptResponse just has stop_reason
     Ok(PromptResponse::new(StopReason::EndTurn))

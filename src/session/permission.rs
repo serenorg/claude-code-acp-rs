@@ -110,8 +110,8 @@ pub struct PermissionHandler {
 impl Default for PermissionHandler {
     fn default() -> Self {
         Self {
-            // Use AcceptEdits as default (compatible with root, allows all tools)
-            mode: PermissionMode::AcceptEdits,
+            // Use Default mode (standard behavior with permission prompts)
+            mode: PermissionMode::Default,
             checker: None,
         }
     }
@@ -120,8 +120,7 @@ impl Default for PermissionHandler {
 impl PermissionHandler {
     /// Create a new permission handler
     ///
-    /// Uses AcceptEdits mode (compatible with root, allows all tools).
-    /// This is the preferred default for compatibility with root environments.
+    /// Uses Default mode (standard behavior with permission prompts).
     pub fn new() -> Self {
         Self::default()
     }
@@ -136,22 +135,20 @@ impl PermissionHandler {
 
     /// Create with settings-based checker
     ///
-    /// Uses AcceptEdits mode (compatible with root, allows all tools).
-    /// This is the preferred default for compatibility with root environments.
+    /// Uses Default mode (standard behavior with permission prompts).
     pub fn with_checker(checker: Arc<RwLock<PermissionChecker>>) -> Self {
         Self {
-            mode: PermissionMode::AcceptEdits,
+            mode: PermissionMode::Default,
             checker: Some(checker),
         }
     }
 
     /// Create with settings-based checker (non-async, for convenience)
     ///
-    /// Uses AcceptEdits mode (compatible with root, allows all tools).
-    /// This is the preferred default for compatibility with root environments.
+    /// Uses Default mode (standard behavior with permission prompts).
     pub fn with_checker_owned(checker: PermissionChecker) -> Self {
         Self {
-            mode: PermissionMode::AcceptEdits,
+            mode: PermissionMode::Default,
             checker: Some(Arc::new(RwLock::new(checker))),
         }
     }
@@ -303,6 +300,17 @@ impl PermissionHandler {
             checker_write.add_allow_rule(tool_name);
         }
     }
+
+    /// Add a fine-grained allow rule based on tool call details
+    /// This is used for "Always Allow" with specific parameters
+    pub fn add_allow_rule_for_tool_call(&self, tool_name: &str, tool_input: &serde_json::Value) {
+        if let Some(ref checker) = self.checker {
+            // Use try_write to avoid blocking - if lock is held, rule addition will be skipped
+            if let Ok(mut checker_write) = checker.try_write() {
+                checker_write.add_allow_rule_for_tool_call(tool_name, tool_input);
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -339,24 +347,10 @@ mod tests {
         let handler = PermissionHandler::new();
         let input = json!({});
 
-        // Default mode is now AcceptEdits - everything auto-approved
-        // (AcceptEdits behaves like BypassPermissions for root compatibility)
+        // Default mode (PermissionMode::Default) auto-approves reads
         assert!(handler.should_auto_approve("Read", &input));
         assert!(handler.should_auto_approve("Glob", &input));
-        assert!(handler.should_auto_approve("Edit", &input));
-        assert!(handler.should_auto_approve("Bash", &input));
-    }
-
-    #[test]
-    fn test_permission_handler_explicit_default_mode() {
-        // Test the old Default mode explicitly
-        let handler = PermissionHandler::with_mode(PermissionMode::Default);
-        let input = json!({});
-
-        // Default mode auto-approves reads
-        assert!(handler.should_auto_approve("Read", &input));
-        assert!(handler.should_auto_approve("Glob", &input));
-        // But not writes
+        // But not writes - these require permission
         assert!(!handler.should_auto_approve("Edit", &input));
         assert!(!handler.should_auto_approve("Bash", &input));
     }

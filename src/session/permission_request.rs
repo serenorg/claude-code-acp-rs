@@ -94,19 +94,54 @@ impl PermissionRequestBuilder {
                 .raw_input(self.tool_input.clone()),
         );
 
+        // Debug: Log the tool call update being sent
+        tracing::debug!(
+            tool_call_id = %self.tool_call_id,
+            title = %self.title,
+            tool_name = %self.tool_name,
+            "Building permission request with ToolCallUpdate"
+        );
+
         // Build the request
         let request = RequestPermissionRequest::new(
-            SessionId::new(self.session_id),
+            SessionId::new(self.session_id.clone()),
             tool_call_update,
             options,
         );
 
+        // Debug: Log the serialized request for protocol debugging
+        if let Ok(json) = serde_json::to_string_pretty(&request) {
+            tracing::trace!(
+                session_id = %self.session_id,
+                request_json = %json,
+                "Sending session/request_permission"
+            );
+        }
+
         // Send request and wait for response
+        tracing::info!(
+            tool_call_id = %self.tool_call_id,
+            session_id = %self.session_id,
+            "Sending permission request, waiting for user response..."
+        );
+
         let response = connection_cx
             .send_request(request)
             .block_task()
             .await
-            .map_err(|e| AgentError::Internal(format!("Permission request failed: {}", e)))?;
+            .map_err(|e| {
+                tracing::error!(
+                    tool_call_id = %self.tool_call_id,
+                    error = %e,
+                    "Permission request failed"
+                );
+                AgentError::Internal(format!("Permission request failed: {}", e))
+            })?;
+
+        tracing::info!(
+            tool_call_id = %self.tool_call_id,
+            "Received permission response"
+        );
 
         // Parse the response
         Ok(parse_permission_response(response.outcome))
@@ -137,7 +172,10 @@ fn parse_permission_response(outcome: RequestPermissionOutcome) -> PermissionOut
 
 /// Format a title for the permission dialog based on tool name and input
 fn format_tool_title(tool_name: &str, input: &serde_json::Value) -> String {
-    match tool_name {
+    // Strip mcp__acp__ prefix if present
+    let stripped_name = tool_name.strip_prefix("mcp__acp__").unwrap_or(tool_name);
+
+    match stripped_name {
         "Read" => {
             let path = input
                 .get("file_path")
@@ -173,7 +211,7 @@ fn format_tool_title(tool_name: &str, input: &serde_json::Value) -> String {
             let pattern = input.get("pattern").and_then(|v| v.as_str()).unwrap_or("");
             format!("Find files: {}", pattern)
         }
-        _ => tool_name.to_string(),
+        _ => stripped_name.to_string(),
     }
 }
 

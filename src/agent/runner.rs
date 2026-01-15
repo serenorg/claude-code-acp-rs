@@ -497,6 +497,12 @@ async fn run_acp_server() -> Result<(), sacp::Error> {
             sacp::on_receive_request!(),
         )
         // Handle session/prompt request
+        //
+        // IMPORTANT: This handler uses `spawn` to run handle_prompt in a background task.
+        // This is necessary because handle_prompt may call `can_use_tool` callback,
+        // which sends `session/request_permission` request and blocks waiting for response.
+        // If we block in the handler directly, the incoming_protocol_actor cannot process
+        // the response, causing a deadlock.
         .on_receive_request(
             {
                 let config = config.clone();
@@ -512,26 +518,47 @@ async fn run_acp_server() -> Result<(), sacp::Error> {
                         prompt_blocks = prompt_len,
                     );
 
-                    async {
-                        tracing::debug!(
-                            "Received session/prompt request for session {}",
-                            session_id
-                        );
+                    tracing::debug!(
+                        "Received session/prompt request for session {}, spawning handler",
+                        session_id
+                    );
 
-                        // Handle the prompt with streaming
-                        match handlers::handle_prompt(request, &config, &sessions, connection_cx)
-                            .await
-                        {
-                            Ok(response) => request_cx.respond(response),
-                            Err(e) => {
-                                tracing::error!("Prompt error: {}", e);
-                                request_cx
-                                    .respond_with_error(sacp::util::internal_error(e.to_string()))
+                    // Spawn the handler in a background task to avoid blocking the event loop.
+                    // This allows the incoming_protocol_actor to continue processing messages,
+                    // including responses to requests sent during prompt handling.
+                    let config = config.clone();
+                    let sessions = sessions.clone();
+                    connection_cx.spawn({
+                        let connection_cx = connection_cx.clone();
+                        async move {
+                            async {
+                                tracing::debug!(
+                                    "Starting prompt handling for session {}",
+                                    session_id
+                                );
+
+                                // Handle the prompt with streaming
+                                match handlers::handle_prompt(
+                                    request,
+                                    &config,
+                                    &sessions,
+                                    connection_cx,
+                                )
+                                .await
+                                {
+                                    Ok(response) => request_cx.respond(response),
+                                    Err(e) => {
+                                        tracing::error!("Prompt error: {}", e);
+                                        request_cx.respond_with_error(sacp::util::internal_error(
+                                            e.to_string(),
+                                        ))
+                                    }
+                                }
                             }
+                            .instrument(span)
+                            .await
                         }
-                    }
-                    .instrument(span)
-                    .await
+                    })
                 }
             },
             sacp::on_receive_request!(),

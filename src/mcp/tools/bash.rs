@@ -18,8 +18,6 @@ use uuid::Uuid;
 use super::base::{Tool, ToolKind};
 use crate::mcp::registry::{ToolContext, ToolResult};
 use crate::session::{BackgroundTerminal, ChildHandle, TerminalExitStatus, WrappedChild};
-// TODO: Uncomment when implementing permission checks
-// use crate::settings::{PermissionCheckResult, PermissionDecision};
 use crate::terminal::TerminalClient;
 
 // Process group management
@@ -84,25 +82,15 @@ impl BashTool {
 
     /// Check permission before executing the tool
     ///
-    /// TODO: Implement interactive permission request flow
-    ///
-    /// Current implementation: Always allow execution (commented out permission checks)
-    ///
-    /// Future implementation should:
-    /// 1. Check for explicit deny rules - block if matched
-    /// 2. Check for explicit allow rules - allow if matched
-    /// 3. For "Ask" decisions - send permission request to client via PermissionManager
-    /// 4. Wait for user response - allow or deny based on user choice
-    ///
-    /// Architecture note: SDK does NOT call can_use_tool for MCP tools, so we need
-    /// to implement the permission request flow within the tool execution path.
+    /// Note: Permission checking is now handled at the SDK level.
+    /// The SDK's `mcp_message` handler calls `can_use_tool` callback before executing MCP tools.
+    /// This method is kept for potential future tool-specific permission logic.
     async fn check_permission(
         &self,
         _input: &serde_json::Value,
         _context: &ToolContext,
     ) -> Option<ToolResult> {
-        // TODO: Implement permission checking
-        // See Edit tool's check_permission for implementation template
+        // Permission check is handled by SDK's can_use_tool callback
         None
     }
 }

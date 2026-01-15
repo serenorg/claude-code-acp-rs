@@ -1,6 +1,6 @@
 [package]
 name = "claude-code-acp-rs"
-version = "0.1.9"
+version = "0.1.10"
 authors = ["guochao.song <soddygo@qq.com>"]
 edition = "2024"
 rust-version = "1.90"
@@ -28,7 +28,7 @@ path = "src/main.rs"
 sacp = "10.1.0"
 
 # Claude Agent SDK
-claude-code-agent-sdk = { version = "0.1.22" }
+claude-code-agent-sdk = "0.1.24"
 
 # Async runtime
 tokio = { version = "1.48", features = [
