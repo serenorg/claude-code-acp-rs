@@ -126,6 +126,91 @@ impl PermissionChecker {
         self.allow_rules.push((rule.to_string(), parsed));
     }
 
+    /// Add a runtime allow rule based on a specific tool call (fine-grained)
+    ///
+    /// This generates a rule based on the actual tool invocation, providing
+    /// finer-grained permissions. For example:
+    /// - Bash: generates `Bash(command_prefix:*)` instead of just `Bash`
+    /// - Read/Edit/Write: generates `Tool(directory/**)` for the file's directory
+    pub fn add_allow_rule_for_tool_call(
+        &mut self,
+        tool_name: &str,
+        tool_input: &serde_json::Value,
+    ) {
+        let rule = self.generate_rule_from_call(tool_name, tool_input);
+        tracing::info!(
+            tool_name = %tool_name,
+            generated_rule = %rule,
+            "Adding fine-grained allow rule"
+        );
+        let parsed = ParsedRule::parse_with_glob(&rule, &self.cwd);
+        self.allow_rules.push((rule, parsed));
+    }
+
+    /// Generate a permission rule string from a tool call
+    fn generate_rule_from_call(&self, tool_name: &str, tool_input: &serde_json::Value) -> String {
+        let stripped = tool_name.strip_prefix("mcp__acp__").unwrap_or(tool_name);
+
+        match stripped {
+            "Bash" => {
+                // Extract command and generate prefix rule
+                if let Some(cmd) = tool_input.get("command").and_then(|v| v.as_str()) {
+                    let prefix = Self::extract_command_prefix(cmd);
+                    if !prefix.is_empty() {
+                        format!("Bash({}:*)", prefix) // e.g., "Bash(cargo build:*)"
+                    } else {
+                        stripped.to_string()
+                    }
+                } else {
+                    stripped.to_string()
+                }
+            }
+            "Read" | "Grep" | "Glob" | "LS" => {
+                // Extract file path and generate directory rule
+                Self::generate_file_rule("Read", tool_input, &self.cwd)
+            }
+            "Edit" | "Write" => {
+                // Extract file path and generate directory rule
+                Self::generate_file_rule(stripped, tool_input, &self.cwd)
+            }
+            _ => stripped.to_string(),
+        }
+    }
+
+    /// Extract command prefix (first two space-separated parts)
+    fn extract_command_prefix(cmd: &str) -> String {
+        let parts: Vec<&str> = cmd.split_whitespace().take(2).collect();
+        parts.join(" ")
+    }
+
+    /// Generate a file-based permission rule
+    fn generate_file_rule(tool_name: &str, tool_input: &serde_json::Value, cwd: &Path) -> String {
+        if let Some(path) = tool_input.get("file_path").and_then(|v| v.as_str()) {
+            let path = Path::new(path);
+
+            // Try to get the directory
+            if let Some(dir) = path.parent() {
+                // Make path relative to cwd if possible
+                let dir_str = if let Ok(relative) = dir.strip_prefix(cwd) {
+                    format!("./{}", relative.display())
+                } else {
+                    dir.to_string_lossy().to_string()
+                };
+
+                // Generate glob rule for the directory
+                if dir_str.is_empty() || dir_str == "." {
+                    format!("{}(./*)", tool_name)
+                } else {
+                    format!("{}({}/**)", tool_name, dir_str)
+                }
+            } else {
+                tool_name.to_string()
+            }
+        } else {
+            tool_name.to_string()
+        }
+    }
+
     /// Add a runtime deny rule
     pub fn add_deny_rule(&mut self, rule: &str) {
         let parsed = ParsedRule::parse_with_glob(rule, &self.cwd);
@@ -346,5 +431,113 @@ mod tests {
         };
         let checker = PermissionChecker::new(settings_with_permissions(permissions), "/tmp");
         assert!(checker.has_rules());
+    }
+
+    #[test]
+    fn test_add_allow_rule_for_bash_command() {
+        let mut checker = PermissionChecker::new(Settings::default(), "/tmp");
+
+        // Add rule for specific bash command
+        checker.add_allow_rule_for_tool_call("Bash", &json!({"command": "cargo build --release"}));
+
+        // Should allow the same command
+        assert_eq!(
+            checker
+                .check_permission("Bash", &json!({"command": "cargo build --release"}))
+                .decision,
+            PermissionDecision::Allow
+        );
+
+        // Should allow similar commands (prefix match)
+        assert_eq!(
+            checker
+                .check_permission("Bash", &json!({"command": "cargo build --debug"}))
+                .decision,
+            PermissionDecision::Allow
+        );
+
+        // Should NOT allow completely different commands
+        assert_eq!(
+            checker
+                .check_permission("Bash", &json!({"command": "rm -rf /"}))
+                .decision,
+            PermissionDecision::Ask
+        );
+    }
+
+    #[test]
+    fn test_add_allow_rule_for_file_operation() {
+        let mut checker = PermissionChecker::new(Settings::default(), "/tmp");
+
+        // Add rule for specific file
+        checker.add_allow_rule_for_tool_call(
+            "Read",
+            &json!({"file_path": "/tmp/project/src/main.rs"}),
+        );
+
+        // Should allow files in the same directory
+        assert_eq!(
+            checker
+                .check_permission("Read", &json!({"file_path": "/tmp/project/src/lib.rs"}))
+                .decision,
+            PermissionDecision::Allow
+        );
+
+        // Should allow subdirectories (glob **)
+        assert_eq!(
+            checker
+                .check_permission(
+                    "Read",
+                    &json!({"file_path": "/tmp/project/src/utils/helper.rs"})
+                )
+                .decision,
+            PermissionDecision::Allow
+        );
+
+        // Should NOT allow different directories
+        assert_eq!(
+            checker
+                .check_permission("Read", &json!({"file_path": "/etc/passwd"}))
+                .decision,
+            PermissionDecision::Ask
+        );
+    }
+
+    #[test]
+    fn test_add_allow_rule_for_mcp_prefixed_tool() {
+        let mut checker = PermissionChecker::new(Settings::default(), "/tmp");
+
+        // Add rule with MCP prefix
+        checker
+            .add_allow_rule_for_tool_call("mcp__acp__Bash", &json!({"command": "npm run build"}));
+
+        // Should work for both prefixed and non-prefixed tool names
+        assert_eq!(
+            checker
+                .check_permission("Bash", &json!({"command": "npm run test"}))
+                .decision,
+            PermissionDecision::Allow
+        );
+        assert_eq!(
+            checker
+                .check_permission("mcp__acp__Bash", &json!({"command": "npm run lint"}))
+                .decision,
+            PermissionDecision::Allow
+        );
+    }
+
+    #[test]
+    fn test_extract_command_prefix() {
+        // Should extract first two parts
+        assert_eq!(
+            PermissionChecker::extract_command_prefix("cargo build --release"),
+            "cargo build"
+        );
+        assert_eq!(
+            PermissionChecker::extract_command_prefix("npm run"),
+            "npm run"
+        );
+        assert_eq!(PermissionChecker::extract_command_prefix("ls"), "ls");
+        assert_eq!(PermissionChecker::extract_command_prefix(""), "");
     }
 }

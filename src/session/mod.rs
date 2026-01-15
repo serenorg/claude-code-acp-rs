@@ -27,6 +27,6 @@ pub use permission_manager::{
     PendingPermissionRequest, PermissionManager, PermissionManagerDecision,
 };
 pub use permission_request::{PermissionOutcome, PermissionRequestBuilder};
-pub use session::Session;
+pub use session::{Session, stable_cache_key};
 pub use usage::UsageTracker;
 pub use wrapped_child::WrappedChild;

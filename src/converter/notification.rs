@@ -344,6 +344,15 @@ impl NotificationConverter {
             tool_info.title.clone()
         };
 
+        // Debug: Log tool call creation
+        tracing::debug!(
+            tool_call_id = %tool_use.id,
+            tool_name = %tool_use.name,
+            title = %title,
+            session_id = %session_id.0,
+            "Creating ToolCall notification for session/update"
+        );
+
         let mut tool_call = ToolCall::new(tool_call_id, &title)
             .kind(tool_kind)
             .status(ToolCallStatus::InProgress) // Tool is being executed

@@ -37,40 +37,15 @@ impl EditTool {
 
     /// Check permission before executing the tool
     ///
-    /// TODO: Implement interactive permission request flow
-    ///
-    /// Current implementation: Always allow execution (commented out permission checks)
-    ///
-    /// Future implementation should:
-    /// 1. Check for explicit deny rules - block if matched
-    /// 2. Check for explicit allow rules - allow if matched
-    /// 3. For "Ask" decisions - send permission request to client via PermissionManager
-    /// 4. Wait for user response - allow or deny based on user choice
-    ///
-    /// Architecture note: SDK does NOT call can_use_tool for MCP tools, so we need
-    /// to implement the permission request flow within the tool execution path.
+    /// Note: Permission checking is now handled at the SDK level.
+    /// The SDK's `mcp_message` handler calls `can_use_tool` callback before executing MCP tools.
+    /// This method is kept for potential future tool-specific permission logic.
     async fn check_permission(
         &self,
         _input: &serde_json::Value,
         _context: &ToolContext,
     ) -> Option<ToolResult> {
-        // TODO: Implement permission checking
-        // let Some(checker) = context.permission_checker.as_ref() else {
-        //     return None;
-        // };
-        // let checker = checker.read().await;
-        // let result: PermissionCheckResult = checker.check_permission("Edit", input);
-        // match result.decision {
-        //     PermissionDecision::Allow => None,
-        //     PermissionDecision::Deny => Some(ToolResult::error(...)),
-        //     PermissionDecision::Ask => {
-        //         // Send permission request via PermissionManager
-        //         // Wait for user response
-        //         // Return result based on user choice
-        //     }
-        // }
-
-        // Currently: Always allow execution
+        // Permission check is handled by SDK's can_use_tool callback
         None
     }
 }

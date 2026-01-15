@@ -1,7 +1,7 @@
 //! PreToolUse hook implementation
 //!
 //! Checks permissions using SettingsManager before tool execution.
-//! For "Ask" decisions, returns `permission_decision: "ask"` to trigger SDK's permission flow.
+//! For "Ask" decisions, sends permission request directly (has correct tool_use_id).
 
 use std::sync::{Arc, OnceLock};
 use std::time::Instant;
@@ -10,6 +10,7 @@ use claude_code_agent_sdk::{
     HookCallback, HookContext, HookInput, HookJsonOutput, HookSpecificOutput,
     PreToolUseHookSpecificOutput, SyncHookJsonOutput,
 };
+use dashmap::DashMap;
 use futures::future::BoxFuture;
 use sacp::{JrConnectionCx, link::AgentToClient};
 use tokio::sync::RwLock;
@@ -41,19 +42,19 @@ use crate::settings::PermissionChecker;
 ///
 /// The hook and `can_use_tool` callback work together:
 /// 1. **Hook** (this file): Makes quick decisions based on static rules (allow/deny/ask)
-/// 2. **`can_use_tool` callback** (`can_use_tool.rs`): Handles interactive permission requests
+/// 2. **`can_use_tool` callback** (`can_use_tool.rs`): Checks cached permission results
 ///
-/// When hook returns "ask", SDK calls `can_use_tool` callback to handle user interaction.
-/// This separation prevents deadlock because:
-/// - Hook returns immediately with a decision
-/// - `can_use_tool` callback can handle async permission requests
+/// For "Ask" decisions, the hook sends permission request directly (using the correct tool_use_id),
+/// then caches the result. The `can_use_tool` callback checks this cache and returns immediately.
 ///
 /// # Arguments
 ///
-/// * `connection_cx_lock` - Reserved for future use (not currently used)
-/// * `session_id` - Reserved for future use (not currently used)
+/// * `connection_cx_lock` - Connection for sending permission requests
+/// * `session_id` - Session ID for permission requests
 /// * `permission_checker` - Optional permission checker for settings-based rules
 /// * `permission_mode` - Shared permission mode that can be updated at runtime
+/// * `permission_cache` - Cache for storing permission results (for can_use_tool callback)
+/// * `tool_use_id_cache` - Cache for storing tool_use_id (for can_use_tool callback)
 ///
 /// # Returns
 ///
@@ -63,13 +64,19 @@ pub fn create_pre_tool_use_hook(
     session_id: String,
     permission_checker: Option<Arc<RwLock<PermissionChecker>>>,
     permission_mode: Arc<RwLock<PermissionMode>>,
+    permission_cache: Arc<DashMap<String, bool>>,
+    tool_use_id_cache: Arc<DashMap<String, String>>,
 ) -> HookCallback {
     Arc::new(
         move |input: HookInput, tool_use_id: Option<String>, _context: HookContext| {
+            // These parameters are kept for API compatibility but no longer used here.
+            // Permission requests are now handled by can_use_tool callback.
             let _connection_cx_lock = Arc::clone(&connection_cx_lock);
             let permission_checker = permission_checker.clone();
             let permission_mode = permission_mode.clone();
             let _session_id = session_id.clone();
+            let _permission_cache = Arc::clone(&permission_cache);
+            let tool_use_id_cache = Arc::clone(&tool_use_id_cache);
 
             // Extract tool name early for span naming
             let (tool_name, is_pre_tool) = match &input {
@@ -146,9 +153,10 @@ pub fn create_pre_tool_use_hook(
                             hook_specific_output: Some(HookSpecificOutput::PreToolUse(
                                 PreToolUseHookSpecificOutput {
                                     permission_decision: Some("allow".to_string()),
-                                    permission_decision_reason: Some(
-                                        format!("Allowed by {} mode (auto-approve all tools)", mode_str),
-                                    ),
+                                    permission_decision_reason: Some(format!(
+                                        "Allowed by {} mode (auto-approve all tools)",
+                                        mode_str
+                                    )),
                                     updated_input: None,
                                 },
                             )),
@@ -244,47 +252,84 @@ pub fn create_pre_tool_use_hook(
                         "Permission check completed"
                     );
 
-                    // TODO: Implement interactive permission request flow
-                    //
-                    // Current implementation: Always allow execution
-                    //
-                    // Future implementation should:
-                    // 1. Check for explicit deny rules - block if matched
-                    // 2. Check for explicit allow rules - allow if matched
-                    // 3. For "Ask" decisions - send permission request via PermissionManager
-                    // 4. Wait for user response - allow or deny based on user choice
-                    //
-                    // Architecture note: SDK does NOT call can_use_tool for MCP tools,
-                    // so we need to implement the permission request flow differently.
-                    //
-                    // See plan file: /Users/soddy/.claude/plans/groovy-painting-truffle.md
+                    // 根据权限决策返回相应的 Hook 输出
+                    // SDK 已修改为在 mcp_message 处理中调用 can_use_tool 回调，
+                    // 因此 Ask 决策会由 SDK 层处理，Hook 只需要返回 continue_: true
+                    match permission_check.decision {
+                        crate::settings::PermissionDecision::Allow => {
+                            tracing::debug!(
+                                tool_name = %tool_name,
+                                rule = ?permission_check.rule,
+                                "Tool execution allowed by rule"
+                            );
+                            HookJsonOutput::Sync(SyncHookJsonOutput {
+                                continue_: Some(true),
+                                hook_specific_output: Some(HookSpecificOutput::PreToolUse(
+                                    PreToolUseHookSpecificOutput {
+                                        permission_decision: Some("allow".to_string()),
+                                        permission_decision_reason: permission_check.rule,
+                                        updated_input: None,
+                                    },
+                                )),
+                                ..Default::default()
+                            })
+                        }
+                        crate::settings::PermissionDecision::Deny => {
+                            tracing::info!(
+                                tool_name = %tool_name,
+                                rule = ?permission_check.rule,
+                                "Tool execution denied by rule"
+                            );
+                            HookJsonOutput::Sync(SyncHookJsonOutput {
+                                continue_: Some(false), // 阻止执行
+                                hook_specific_output: Some(HookSpecificOutput::PreToolUse(
+                                    PreToolUseHookSpecificOutput {
+                                        permission_decision: Some("deny".to_string()),
+                                        permission_decision_reason: permission_check.rule,
+                                        updated_input: None,
+                                    },
+                                )),
+                                ..Default::default()
+                            })
+                        }
+                        crate::settings::PermissionDecision::Ask => {
+                            // Following TypeScript version's design:
+                            // For "ask" decisions, we just return { continue: true } to let the
+                            // normal permission flow continue. The actual permission request
+                            // will be sent by the can_use_tool callback, NOT here.
+                            //
+                            // This ensures proper message ordering:
+                            // 1. SDK processes tool_use -> sends session/update ToolCall
+                            // 2. SDK calls can_use_tool callback
+                            // 3. can_use_tool sends requestPermission() and waits for user response
+                            //
+                            // If we sent requestPermission() here (before can_use_tool), there
+                            // could be race conditions with session/update notifications.
 
-                    tracing::debug!(
-                        tool_name = %tool_name,
-                        "Tool execution allowed (permission checks TODO)"
-                    );
+                            // Cache tool_use_id for can_use_tool callback to use
+                            // The CLI doesn't always pass tool_use_id in mcp_message requests,
+                            // so we cache it here where we have it.
+                            if let Some(ref tuid) = tool_use_id {
+                                let key = crate::session::stable_cache_key(&tool_input);
+                                tracing::debug!(
+                                    tool_name = %tool_name,
+                                    tool_use_id = %tuid,
+                                    "Caching tool_use_id for can_use_tool callback"
+                                );
+                                tool_use_id_cache.insert(key, tuid.clone());
+                            }
 
-                    HookJsonOutput::Sync(SyncHookJsonOutput {
-                        continue_: Some(true),
-                        hook_specific_output: Some(HookSpecificOutput::PreToolUse(
-                            PreToolUseHookSpecificOutput {
-                                permission_decision: Some("allow".to_string()),
-                                permission_decision_reason: Some(
-                                    "Permission checks not yet implemented - allowing execution"
-                                        .to_string(),
-                                ),
-                                updated_input: None,
-                            },
-                        )),
-                        ..Default::default()
-                    })
-
-                    // TODO: Uncomment when implementing permission checks
-                    // match permission_check.decision {
-                    //     crate::settings::PermissionDecision::Allow => { ... }
-                    //     crate::settings::PermissionDecision::Deny => { ... }
-                    //     crate::settings::PermissionDecision::Ask => { ... }
-                    // }
+                            tracing::debug!(
+                                tool_name = %tool_name,
+                                "Ask decision - delegating to can_use_tool callback"
+                            );
+                            HookJsonOutput::Sync(SyncHookJsonOutput {
+                                continue_: Some(true),
+                                hook_specific_output: None,
+                                ..Default::default()
+                            })
+                        }
+                    }
                 }
                 .instrument(span),
             ) as BoxFuture<'static, HookJsonOutput>
@@ -316,11 +361,15 @@ mod tests {
     ) -> HookCallback {
         let connection_cx_lock: Arc<OnceLock<JrConnectionCx<AgentToClient>>> =
             Arc::new(OnceLock::new());
+        let permission_cache: Arc<DashMap<String, bool>> = Arc::new(DashMap::new());
+        let tool_use_id_cache: Arc<DashMap<String, String>> = Arc::new(DashMap::new());
         create_pre_tool_use_hook(
             connection_cx_lock,
             "test-session".to_string(),
             Some(checker),
             Arc::new(RwLock::new(mode)),
+            permission_cache,
+            tool_use_id_cache,
         )
     }
 
@@ -392,12 +441,15 @@ mod tests {
     // }
 
     #[tokio::test]
-    async fn test_pre_tool_use_hook_always_allows() {
-        // TODO: Permission checks not yet implemented - all tools are allowed
+    async fn test_pre_tool_use_hook_ask_by_default() {
+        // When no rules match, decision is "Ask".
+        // Following TypeScript version's design, the hook just returns { continue: true }
+        // to let the can_use_tool callback handle the permission request.
         let checker = make_permission_checker(PermissionSettings::default());
         let hook = make_test_hook(checker);
 
-        // Test MCP tool - should be allowed
+        // Test MCP tool - no matching rules means "Ask" decision,
+        // hook returns continue=true with no hook_specific_output
         let input_mcp = HookInput::PreToolUse(claude_code_agent_sdk::PreToolUseHookInput {
             session_id: "test".to_string(),
             transcript_path: "/tmp/test".to_string(),
@@ -411,18 +463,18 @@ mod tests {
 
         match result_mcp {
             HookJsonOutput::Sync(output) => {
+                // Ask decision returns continue=true with no hook_specific_output
+                // The actual permission request is handled by can_use_tool callback
                 assert_eq!(output.continue_, Some(true));
-                if let Some(HookSpecificOutput::PreToolUse(specific)) = output.hook_specific_output
-                {
-                    assert_eq!(specific.permission_decision, Some("allow".to_string()));
-                } else {
-                    panic!("Expected PreToolUse specific output with permission_decision");
-                }
+                assert!(
+                    output.hook_specific_output.is_none(),
+                    "Ask decision should not set hook_specific_output"
+                );
             }
             HookJsonOutput::Async(_) => panic!("Expected sync output"),
         }
 
-        // Test built-in tool - should also be allowed (permission checks TODO)
+        // Test built-in tool - same behavior
         let input_builtin = HookInput::PreToolUse(claude_code_agent_sdk::PreToolUseHookInput {
             session_id: "test".to_string(),
             transcript_path: "/tmp/test".to_string(),
@@ -436,14 +488,12 @@ mod tests {
 
         match result_builtin {
             HookJsonOutput::Sync(output) => {
+                // Ask decision returns continue=true with no hook_specific_output
                 assert_eq!(output.continue_, Some(true));
-                if let Some(HookSpecificOutput::PreToolUse(specific)) = output.hook_specific_output
-                {
-                    // Currently: All tools are allowed (permission checks TODO)
-                    assert_eq!(specific.permission_decision, Some("allow".to_string()));
-                } else {
-                    panic!("Expected PreToolUse specific output with permission_decision");
-                }
+                assert!(
+                    output.hook_specific_output.is_none(),
+                    "Ask decision should not set hook_specific_output"
+                );
             }
             HookJsonOutput::Async(_) => panic!("Expected sync output"),
         }

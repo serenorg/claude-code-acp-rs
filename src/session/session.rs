@@ -3,7 +3,8 @@
 //! Each session represents an active Claude conversation with its own
 //! ClaudeClient instance, usage tracking, and permission state.
 
-use std::collections::HashMap;
+use dashmap::DashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::error::Error;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -99,6 +100,41 @@ pub struct Session {
     connection_cx_lock: Arc<OnceLock<JrConnectionCx<AgentToClient>>>,
     /// Cancel signal sender - used to notify when MCP cancellation is received
     cancel_sender: broadcast::Sender<()>,
+    /// Cache for permission results by tool_input
+    /// PreToolUse hook saves authorized results here, can_use_tool callback checks it
+    /// Key: JSON string of tool_input, Value: true if authorized
+    /// Only stores authorized results (denied tools don't execute, no need to cache)
+    permission_cache: Arc<DashMap<String, bool>>,
+    /// Cache for tool_use_id by tool_input
+    /// PreToolUse hook caches this when Ask decision is made
+    /// can_use_tool callback uses this to get tool_use_id when CLI doesn't provide it
+    /// Key: stable cache key of tool_input, Value: tool_use_id
+    tool_use_id_cache: Arc<DashMap<String, String>>,
+}
+
+/// Generate a stable cache key from JSON value
+///
+/// JSON serialization order is not guaranteed to be stable.
+/// This function canonicalizes the JSON by sorting object keys using BTreeMap,
+/// ensuring identical content always produces the same cache key.
+pub fn stable_cache_key(tool_input: &serde_json::Value) -> String {
+    fn canonicalize(value: &serde_json::Value) -> serde_json::Value {
+        match value {
+            serde_json::Value::Object(map) => {
+                // Use BTreeMap to ensure keys are sorted
+                let sorted: BTreeMap<_, _> = map
+                    .iter()
+                    .map(|(k, v)| (k.clone(), canonicalize(v)))
+                    .collect();
+                serde_json::Value::Object(sorted.into_iter().collect())
+            }
+            serde_json::Value::Array(arr) => {
+                serde_json::Value::Array(arr.iter().map(canonicalize).collect())
+            }
+            other => other.clone(),
+        }
+    }
+    canonicalize(tool_input).to_string()
 }
 
 impl Session {
@@ -169,12 +205,21 @@ impl Session {
 
         // Create shared permission mode that can be updated at runtime
         // This is shared between the hook and the permission handler
-        // Default to AcceptEdits (compatible with root, allows tool execution)
-        let permission_mode = Arc::new(RwLock::new(PermissionMode::AcceptEdits));
+        // Default to Default mode (standard behavior with permission prompts)
+        let permission_mode = Arc::new(RwLock::new(PermissionMode::Default));
 
         // Create shared connection_cx_lock for hook permission requests
         let connection_cx_lock: Arc<OnceLock<JrConnectionCx<AgentToClient>>> =
             Arc::new(OnceLock::new());
+
+        // Create shared permission_cache for hook-to-callback communication
+        // PreToolUse hook caches permission results, can_use_tool callback checks it
+        let permission_cache: Arc<DashMap<String, bool>> = Arc::new(DashMap::new());
+
+        // Create shared tool_use_id_cache for hook-to-callback tool_use_id passing
+        // PreToolUse hook caches tool_use_id when Ask decision is made
+        // can_use_tool callback uses this when CLI doesn't provide tool_use_id
+        let tool_use_id_cache: Arc<DashMap<String, String>> = Arc::new(DashMap::new());
 
         // Create hooks with shared permission checker and mode
         let pre_tool_use_hook = create_pre_tool_use_hook(
@@ -182,6 +227,8 @@ impl Session {
             session_id.clone(),
             Some(permission_checker.clone()),
             permission_mode.clone(),
+            permission_cache.clone(),
+            tool_use_id_cache.clone(),
         );
         let post_tool_use_hook = create_post_tool_use_hook(hook_callback_registry.clone());
 
@@ -399,6 +446,8 @@ impl Session {
             external_mcp_connected: AtomicBool::new(false),
             connection_cx_lock,
             cancel_sender: broadcast::channel(1).0,
+            permission_cache,
+            tool_use_id_cache,
         };
 
         // Wrap in Arc
@@ -481,6 +530,64 @@ impl Session {
     /// Returns None if called before handle_prompt sets the connection.
     pub fn get_connection_cx(&self) -> Option<&JrConnectionCx<AgentToClient>> {
         self.connection_cx_lock.get()
+    }
+
+    /// Cache a permission result for a tool_input
+    ///
+    /// Called by PreToolUse hook after user grants permission.
+    /// The can_use_tool callback checks this cache before sending permission requests.
+    pub fn cache_permission(&self, tool_input: &serde_json::Value, allowed: bool) {
+        let key = stable_cache_key(tool_input);
+        tracing::debug!(
+            key_len = key.len(),
+            allowed = allowed,
+            "Caching permission result"
+        );
+        self.permission_cache.insert(key, allowed);
+    }
+
+    /// Check if a tool_input has cached permission
+    ///
+    /// Called by can_use_tool callback to check if permission was already granted.
+    /// Returns Some(true) if allowed, Some(false) if denied, None if not cached.
+    /// Removes the entry from cache after retrieval (one-time use).
+    pub fn check_cached_permission(&self, tool_input: &serde_json::Value) -> Option<bool> {
+        let key = stable_cache_key(tool_input);
+        self.permission_cache.remove(&key).map(|(_, v)| v)
+    }
+
+    /// Get a reference to the permission_cache for sharing with hooks
+    pub fn permission_cache(&self) -> Arc<DashMap<String, bool>> {
+        Arc::clone(&self.permission_cache)
+    }
+
+    /// Cache tool_use_id for a tool_input
+    ///
+    /// Called by PreToolUse hook when Ask decision is made.
+    /// The can_use_tool callback uses this to get tool_use_id when CLI doesn't provide it.
+    pub fn cache_tool_use_id(&self, tool_input: &serde_json::Value, tool_use_id: &str) {
+        let key = stable_cache_key(tool_input);
+        tracing::debug!(
+            key_len = key.len(),
+            tool_use_id = %tool_use_id,
+            "Caching tool_use_id"
+        );
+        self.tool_use_id_cache.insert(key, tool_use_id.to_string());
+    }
+
+    /// Get cached tool_use_id for a tool_input
+    ///
+    /// Called by can_use_tool callback to get tool_use_id when CLI doesn't provide it.
+    /// Returns the tool_use_id if cached, None otherwise.
+    /// Removes the entry from cache after retrieval (one-time use).
+    pub fn get_cached_tool_use_id(&self, tool_input: &serde_json::Value) -> Option<String> {
+        let key = stable_cache_key(tool_input);
+        self.tool_use_id_cache.remove(&key).map(|(_, v)| v)
+    }
+
+    /// Get a reference to the tool_use_id_cache for sharing with hooks
+    pub fn tool_use_id_cache(&self) -> Arc<DashMap<String, String>> {
+        Arc::clone(&self.tool_use_id_cache)
     }
 
     /// Connect to external MCP servers
@@ -997,11 +1104,87 @@ mod tests {
         )
         .unwrap();
 
-        // Default is now AcceptEdits (compatible with root user environments)
-        assert_eq!(session.permission_mode().await, PermissionMode::AcceptEdits);
-        session
-            .set_permission_mode(PermissionMode::DontAsk)
-            .await;
+        // Default is Default mode (standard behavior with permission prompts)
+        assert_eq!(session.permission_mode().await, PermissionMode::Default);
+        session.set_permission_mode(PermissionMode::DontAsk).await;
         assert_eq!(session.permission_mode().await, PermissionMode::DontAsk);
+    }
+
+    #[test]
+    fn test_stable_cache_key_ordering() {
+        use serde_json::json;
+
+        // JSON objects with same content but different key ordering should produce same cache key
+        let json1 = json!({"a": 1, "b": 2, "c": 3});
+        let json2 = json!({"c": 3, "b": 2, "a": 1});
+        let json3 = json!({"b": 2, "a": 1, "c": 3});
+
+        let key1 = stable_cache_key(&json1);
+        let key2 = stable_cache_key(&json2);
+        let key3 = stable_cache_key(&json3);
+
+        assert_eq!(
+            key1, key2,
+            "Different key ordering should produce same cache key"
+        );
+        assert_eq!(
+            key2, key3,
+            "Different key ordering should produce same cache key"
+        );
+    }
+
+    #[test]
+    fn test_stable_cache_key_nested_objects() {
+        use serde_json::json;
+
+        // Nested objects should also be canonicalized
+        let json1 = json!({
+            "command": "cargo build",
+            "options": {"a": 1, "b": 2}
+        });
+        let json2 = json!({
+            "options": {"b": 2, "a": 1},
+            "command": "cargo build"
+        });
+
+        let key1 = stable_cache_key(&json1);
+        let key2 = stable_cache_key(&json2);
+
+        assert_eq!(key1, key2, "Nested objects should also produce stable keys");
+    }
+
+    #[test]
+    fn test_stable_cache_key_arrays() {
+        use serde_json::json;
+
+        // Arrays with objects inside should be canonicalized
+        let json1 = json!({
+            "items": [{"a": 1, "b": 2}, {"c": 3, "d": 4}]
+        });
+        let json2 = json!({
+            "items": [{"b": 2, "a": 1}, {"d": 4, "c": 3}]
+        });
+
+        let key1 = stable_cache_key(&json1);
+        let key2 = stable_cache_key(&json2);
+
+        assert_eq!(key1, key2, "Arrays with objects should produce stable keys");
+    }
+
+    #[test]
+    fn test_stable_cache_key_different_content() {
+        use serde_json::json;
+
+        // Different content should produce different keys
+        let json1 = json!({"command": "cargo build"});
+        let json2 = json!({"command": "cargo test"});
+
+        let key1 = stable_cache_key(&json1);
+        let key2 = stable_cache_key(&json2);
+
+        assert_ne!(
+            key1, key2,
+            "Different content should produce different keys"
+        );
     }
 }
