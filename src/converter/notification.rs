@@ -6,20 +6,67 @@
 use std::time::Instant;
 
 use claude_code_agent_sdk::{
-    AssistantMessage, ContentBlock as SdkContentBlock, Message, ResultMessage, StreamEvent,
-    ToolResultBlock, ToolResultContent, ToolUseBlock,
+    AssistantMessage, ContentBlock as SdkContentBlock, ImageBlock, ImageSource, Message,
+    ResultMessage, StreamEvent, ToolResultBlock, ToolResultContent, ToolUseBlock,
 };
 use dashmap::DashMap;
+use once_cell::sync::Lazy;
+use regex::Regex;
 use sacp::schema::{
-    ContentBlock as AcpContentBlock, ContentChunk, Diff, Plan, PlanEntry, PlanEntryPriority,
-    PlanEntryStatus, SessionId, SessionNotification, SessionUpdate, Terminal, TextContent,
-    ToolCall, ToolCallContent, ToolCallId, ToolCallLocation, ToolCallStatus, ToolCallUpdate,
-    ToolCallUpdateFields, ToolKind as AcpToolKind,
+    ContentBlock as AcpContentBlock, ContentChunk, Diff, ImageContent, Plan, PlanEntry,
+    PlanEntryPriority, PlanEntryStatus, SessionId, SessionNotification, SessionUpdate, Terminal,
+    TextContent, ToolCall, ToolCallContent, ToolCallId, ToolCallLocation, ToolCallStatus,
+    ToolCallUpdate, ToolCallUpdateFields, ToolKind as AcpToolKind,
 };
 
 use crate::types::{ToolKind, ToolUseEntry};
 
 use super::extract_tool_info;
+
+/// Static regex for finding backtick sequences at start of lines
+/// Used by markdown_escape to determine the appropriate escape sequence
+static BACKTICK_REGEX: Lazy<Regex> =
+    Lazy::new(|| Regex::new(r"(?m)^```+").expect("valid backtick regex"));
+
+/// Static regex for removing SYSTEM_REMINDER blocks
+/// Matches <system-reminder>...</system-reminder> including multiline content
+static SYSTEM_REMINDER_REGEX: Lazy<Regex> =
+    Lazy::new(|| Regex::new(r"(?s)<system-reminder>.*?</system-reminder>").expect("valid system-reminder regex"));
+
+/// Wrap text in markdown code block with appropriate number of backticks
+///
+/// Ensures the text is safely wrapped by using more backticks than any sequence
+/// found in the text itself.
+///
+/// Reference: vendors/claude-code-acp/src/tools.ts:591-599
+fn markdown_escape(text: &str) -> String {
+    let mut escape = "```".to_string();
+
+    // Find all sequences of backticks at the start of lines
+    for cap in BACKTICK_REGEX.captures_iter(text) {
+        let m = cap.get(0).expect("match exists").as_str();
+        while m.len() >= escape.len() {
+            escape.push('`');
+        }
+    }
+
+    // Build the final string
+    let needs_newline = !text.ends_with('\n');
+    format!(
+        "{}\n{}{}{}",
+        escape,
+        text,
+        if needs_newline { "\n" } else { "" },
+        escape
+    )
+}
+
+/// Remove SYSTEM_REMINDER tags and their content from text
+///
+/// Reference: vendors/claude-code-acp/src/tools.ts:430-431
+fn remove_system_reminders(text: &str) -> String {
+    SYSTEM_REMINDER_REGEX.replace_all(text, "").to_string()
+}
 
 /// Notification converter for transforming SDK messages to ACP notifications
 ///
@@ -142,14 +189,31 @@ impl NotificationConverter {
                     // Cache the tool use for later correlation with result
                     self.cache_tool_use(tool_use);
                     let session_id = _session_id;
+                    // Special handling for TodoWrite: send Plan instead of ToolCall
+                    // Reference: vendors/claude-code-acp/src/acp-agent.ts lines 1051-1058
+                    let effective_name = tool_use
+                        .name
+                        .strip_prefix("mcp__acp__")
+                        .unwrap_or(&tool_use.name);
+                    if effective_name == "TodoWrite" {
+                        if let Some(notification) =
+                            self.make_plan_from_todo_write(session_id, tool_use)
+                        {
+                            notifications.push(notification);
+                            continue;
+                        }
+                    }
                     notifications.push(self.make_tool_call(&session_id, tool_use));
                 }
                 SdkContentBlock::ToolResult(tool_result) => {
                     let session_id = _session_id;
                     notifications.extend(self.make_tool_result(&session_id, tool_result));
                 }
-                SdkContentBlock::Image(_) => {
-                    // Images in assistant messages are not typically sent as notifications
+                SdkContentBlock::Image(image) => {
+                    // Convert SDK Image to ACP Image notification
+                    // Reference: vendors/claude-code-acp/src/acp-agent.ts lines 1027-1035
+                    let session_id = _session_id;
+                    notifications.push(self.make_image_message(session_id, image));
                 }
             }
         }
@@ -168,19 +232,112 @@ impl NotificationConverter {
 
         match event_type {
             Some("content_block_start") => {
-                // Handle content_block_start - important for tool calls
-                // When streaming is enabled, tool_use blocks arrive via content_block_start
+                // Handle content_block_start - important for tool calls and results
+                // When streaming is enabled, tool_use and tool_result blocks arrive via content_block_start
                 if let Some(content_block) = event.event.get("content_block") {
-                    // Check if this is a tool_use block
                     if let Some(block_type) = content_block.get("type").and_then(|v| v.as_str()) {
-                        if block_type == "tool_use" || block_type == "mcp_tool_use" {
-                            // Parse tool_use from content_block
-                            if let Ok(tool_use) =
-                                serde_json::from_value::<ToolUseBlock>(content_block.clone())
-                            {
-                                self.cache_tool_use(&tool_use);
-                                return vec![self.make_tool_call(session_id, &tool_use)];
+                        // Handle tool_use types
+                        // Reference: vendors/claude-code-acp/src/acp-agent.ts lines 1047-1049
+                        if matches!(
+                            block_type,
+                            "tool_use" | "server_tool_use" | "mcp_tool_use"
+                        ) {
+                            match serde_json::from_value::<ToolUseBlock>(content_block.clone()) {
+                                Ok(tool_use) => {
+                                    self.cache_tool_use(&tool_use);
+                                    // Special handling for TodoWrite: send Plan instead of ToolCall
+                                    // Reference: vendors/claude-code-acp/src/acp-agent.ts lines 1051-1058
+                                    let effective_name = tool_use
+                                        .name
+                                        .strip_prefix("mcp__acp__")
+                                        .unwrap_or(&tool_use.name);
+                                    if effective_name == "TodoWrite" {
+                                        if let Some(notification) =
+                                            self.make_plan_from_todo_write(session_id, &tool_use)
+                                        {
+                                            return vec![notification];
+                                        }
+                                    }
+                                    return vec![self.make_tool_call(session_id, &tool_use)];
+                                }
+                                Err(e) => {
+                                    tracing::error!(
+                                        session_id = %session_id.0,
+                                        block_type = %block_type,
+                                        error = %e,
+                                        "Failed to parse tool_use block"
+                                    );
+                                }
                             }
+                        }
+                        // Handle tool_result types
+                        // Reference: vendors/claude-code-acp/src/acp-agent.ts lines 1109-1116
+                        else if matches!(
+                            block_type,
+                            "tool_result"
+                                | "mcp_tool_result"
+                                | "tool_search_tool_result"
+                                | "web_fetch_tool_result"
+                                | "web_search_tool_result"
+                                | "code_execution_tool_result"
+                                | "bash_code_execution_tool_result"
+                                | "text_editor_code_execution_tool_result"
+                        ) {
+                            match serde_json::from_value::<ToolResultBlock>(content_block.clone()) {
+                                Ok(tool_result) => {
+                                    return self.make_tool_result(session_id, &tool_result);
+                                }
+                                Err(e) => {
+                                    tracing::error!(
+                                        session_id = %session_id.0,
+                                        block_type = %block_type,
+                                        error = %e,
+                                        "Failed to parse tool_result block"
+                                    );
+                                }
+                            }
+                        }
+                        // Handle image type
+                        // Reference: vendors/claude-code-acp/src/acp-agent.ts lines 1027-1035
+                        else if block_type == "image" {
+                            match serde_json::from_value::<ImageBlock>(content_block.clone()) {
+                                Ok(image) => {
+                                    return vec![self.make_image_message(session_id, &image)];
+                                }
+                                Err(e) => {
+                                    tracing::error!(
+                                        session_id = %session_id.0,
+                                        block_type = %block_type,
+                                        error = %e,
+                                        "Failed to parse image block"
+                                    );
+                                }
+                            }
+                        }
+                        // Skip known non-notification types
+                        // Reference: vendors/claude-code-acp/src/acp-agent.ts lines 1141-1148
+                        else if matches!(
+                            block_type,
+                            "text"
+                                | "thinking"
+                                | "document"
+                                | "search_result"
+                                | "redacted_thinking"
+                                | "input_json_delta"
+                                | "citations_delta"
+                                | "signature_delta"
+                                | "container_upload"
+                        ) {
+                            // These are handled elsewhere or not needed as notifications
+                        }
+                        // Log unknown block types (like TS's unreachable)
+                        else {
+                            tracing::warn!(
+                                session_id = %session_id.0,
+                                block_type = %block_type,
+                                content_block = ?content_block,
+                                "Unknown content_block type in content_block_start"
+                            );
                         }
                     }
                 }
@@ -188,22 +345,56 @@ impl NotificationConverter {
             }
             Some("content_block_delta") => {
                 if let Some(delta) = event.event.get("delta") {
-                    // Text delta
-                    if let Some(text) = delta.get("text").and_then(|v| v.as_str()) {
-                        return vec![self.make_agent_message_chunk(session_id, text)];
-                    }
-                    // Thinking delta
-                    if let Some(thinking) = delta.get("thinking").and_then(|v| v.as_str()) {
-                        return vec![self.make_agent_thought_chunk(session_id, thinking)];
+                    if let Some(delta_type) = delta.get("type").and_then(|v| v.as_str()) {
+                        match delta_type {
+                            "text_delta" => {
+                                if let Some(text) = delta.get("text").and_then(|v| v.as_str()) {
+                                    return vec![self.make_agent_message_chunk(session_id, text)];
+                                }
+                            }
+                            "thinking_delta" => {
+                                if let Some(thinking) =
+                                    delta.get("thinking").and_then(|v| v.as_str())
+                                {
+                                    return vec![self.make_agent_thought_chunk(session_id, thinking)];
+                                }
+                            }
+                            // Skip known delta types that don't need notifications
+                            "input_json_delta" | "citations_delta" | "signature_delta" => {}
+                            // Log unknown delta types
+                            _ => {
+                                tracing::debug!(
+                                    session_id = %session_id.0,
+                                    delta_type = %delta_type,
+                                    "Unknown delta type in content_block_delta"
+                                );
+                            }
+                        }
+                    } else {
+                        // Fallback for delta without explicit type field
+                        if let Some(text) = delta.get("text").and_then(|v| v.as_str()) {
+                            return vec![self.make_agent_message_chunk(session_id, text)];
+                        }
+                        if let Some(thinking) = delta.get("thinking").and_then(|v| v.as_str()) {
+                            return vec![self.make_agent_thought_chunk(session_id, thinking)];
+                        }
                     }
                 }
                 vec![]
             }
-            Some("content_block_stop") => {
-                // Could be used to signal end of a block
+            // No content needed for these events
+            Some("content_block_stop") | Some("message_start") | Some("message_delta")
+            | Some("message_stop") => vec![],
+            // Log unknown event types (like TS's unreachable)
+            Some(unknown_type) => {
+                tracing::warn!(
+                    session_id = %session_id.0,
+                    event_type = %unknown_type,
+                    "Unknown stream event type"
+                );
                 vec![]
             }
-            _ => vec![],
+            None => vec![],
         }
     }
 
@@ -293,6 +484,36 @@ impl NotificationConverter {
             session_id.clone(),
             SessionUpdate::AgentThoughtChunk(ContentChunk::new(AcpContentBlock::Text(
                 TextContent::new(chunk),
+            ))),
+        )
+    }
+
+    /// Make an image message notification
+    ///
+    /// Converts SDK ImageBlock to ACP ImageContent and wraps in AgentMessageChunk.
+    /// Reference: vendors/claude-code-acp/src/acp-agent.ts lines 1027-1035
+    #[allow(clippy::unused_self)]
+    fn make_image_message(
+        &self,
+        session_id: &SessionId,
+        image: &ImageBlock,
+    ) -> SessionNotification {
+        let (data, mime_type, uri) = match &image.source {
+            ImageSource::Base64 { media_type, data } => {
+                (data.clone(), media_type.clone(), None)
+            }
+            ImageSource::Url { url } => {
+                // For URL-based images, data is empty and uri is set
+                (String::new(), String::new(), Some(url.clone()))
+            }
+        };
+
+        let image_content = ImageContent::new(data, mime_type).uri(uri);
+
+        SessionNotification::new(
+            session_id.clone(),
+            SessionUpdate::AgentMessageChunk(ContentChunk::new(AcpContentBlock::Image(
+                image_content,
             ))),
         )
     }
@@ -389,8 +610,24 @@ impl NotificationConverter {
         tool_result: &ToolResultBlock,
     ) -> Vec<SessionNotification> {
         let Some(entry) = self.get_tool_use(&tool_result.tool_use_id) else {
+            // Tool call not found in cache - this can happen if:
+            // 1. Tool was never cached (bug in streaming handling)
+            // 2. Tool was already processed and removed
+            // 3. Duplicate tool result received
+            tracing::warn!(
+                session_id = %session_id.0,
+                tool_use_id = %tool_result.tool_use_id,
+                "Tool call not found in cache, skipping tool result notification"
+            );
             return vec![];
         };
+
+        tracing::debug!(
+            session_id = %session_id.0,
+            tool_use_id = %tool_result.tool_use_id,
+            tool_name = %entry.name,
+            "Processing tool result notification"
+        );
 
         let output = match &tool_result.content {
             Some(ToolResultContent::Text(text)) => text.clone(),
@@ -423,29 +660,31 @@ impl NotificationConverter {
             .raw_output(raw_output);
         let update = ToolCallUpdate::new(tool_call_id, update_fields);
 
-        let mut notifications = vec![SessionNotification::new(
+        let notifications = vec![SessionNotification::new(
             session_id.clone(),
             SessionUpdate::ToolCallUpdate(update),
         )];
 
-        // For TodoWrite, also send a Plan notification
-        if entry.name == "TodoWrite" && !is_error {
-            if let Some(plan_notification) = self.build_plan_notification(session_id, &entry) {
-                notifications.push(plan_notification);
-            }
-        }
+        // Note: Plan notification for TodoWrite is now sent at tool_use time
+        // (in make_plan_from_todo_write), so we don't send it here anymore.
+        // This matches TypeScript behavior: acp-agent.ts lines 1051-1058
 
         notifications
     }
 
-    /// Build a Plan notification from TodoWrite input
-    fn build_plan_notification(
+    /// Make a Plan notification from TodoWrite tool_use
+    ///
+    /// This is called when we receive a TodoWrite tool_use, to send the Plan
+    /// immediately (instead of waiting for tool_result).
+    /// Reference: vendors/claude-code-acp/src/acp-agent.ts lines 1051-1058
+    #[allow(clippy::unused_self)]
+    fn make_plan_from_todo_write(
         &self,
         session_id: &SessionId,
-        entry: &ToolUseEntry,
+        tool_use: &ToolUseBlock,
     ) -> Option<SessionNotification> {
         // Extract todos from input
-        let todos = entry.input.get("todos")?.as_array()?;
+        let todos = tool_use.input.get("todos")?.as_array()?;
 
         let plan_entries: Vec<PlanEntry> = todos
             .iter()
@@ -479,14 +718,22 @@ impl NotificationConverter {
     /// Build tool result content based on tool type
     ///
     /// For Edit/Write tools, returns Diff content.
-    /// For other tools, returns text content.
+    /// For Read tool, removes SYSTEM_REMINDER and wraps with markdown.
+    /// For errors, wraps with markdown code block.
+    /// Reference: vendors/claude-code-acp/src/tools.ts toolUpdateFromToolResult
     fn build_tool_result_content(
         &self,
         entry: &ToolUseEntry,
         output: &str,
         is_error: bool,
     ) -> Vec<ToolCallContent> {
-        match entry.name.as_str() {
+        // Strip mcp__acp__ prefix for matching
+        let effective_name = entry
+            .name
+            .strip_prefix("mcp__acp__")
+            .unwrap_or(&entry.name);
+
+        match effective_name {
             "Edit" if !is_error => {
                 // Extract file_path, old_string, new_string from input
                 let file_path = entry
@@ -532,6 +779,19 @@ impl NotificationConverter {
                     let diff = Diff::new(file_path, content);
                     vec![ToolCallContent::Diff(diff)]
                 }
+            }
+            "Read" if !is_error => {
+                // Remove SYSTEM_REMINDER and wrap with markdown
+                // Reference: vendors/claude-code-acp/src/tools.ts:430-431
+                let cleaned = remove_system_reminders(output);
+                let wrapped = markdown_escape(&cleaned);
+                vec![wrapped.into()]
+            }
+            _ if is_error => {
+                // Wrap errors with markdown code block
+                // Reference: vendors/claude-code-acp/src/tools.ts:553-556
+                let wrapped = format!("```\n{}\n```", output);
+                vec![wrapped.into()]
             }
             _ => {
                 // Default: text content
@@ -710,11 +970,11 @@ mod tests {
     }
 
     #[test]
-    fn test_build_plan_notification() {
+    fn test_make_plan_from_todo_write() {
         let converter = NotificationConverter::new();
         let session_id = SessionId::new("session-1");
 
-        // Cache a TodoWrite tool use
+        // Create a TodoWrite tool use
         let tool_use = ToolUseBlock {
             id: "todo_123".to_string(),
             name: "TodoWrite".to_string(),
@@ -738,10 +998,8 @@ mod tests {
                 ]
             }),
         };
-        converter.cache_tool_use(&tool_use);
 
-        let entry = converter.get_tool_use("todo_123").unwrap();
-        let notification = converter.build_plan_notification(&session_id, &entry);
+        let notification = converter.make_plan_from_todo_write(&session_id, &tool_use);
 
         assert!(notification.is_some());
         let notification = notification.unwrap();
@@ -760,7 +1018,8 @@ mod tests {
     }
 
     #[test]
-    fn test_make_tool_result_todowrite_includes_plan() {
+    fn test_make_tool_result_todowrite_no_duplicate_plan() {
+        // Since Plan is now sent at tool_use time, tool_result should NOT include Plan
         let converter = NotificationConverter::new();
         let session_id = SessionId::new("session-1");
 
@@ -789,13 +1048,12 @@ mod tests {
 
         let notifications = converter.make_tool_result(&session_id, &tool_result);
 
-        // Should have 2 notifications: ToolCallUpdate and Plan
-        assert_eq!(notifications.len(), 2);
+        // Should have only 1 notification: ToolCallUpdate (no Plan, since Plan is sent at tool_use time)
+        assert_eq!(notifications.len(), 1);
         assert!(matches!(
             notifications[0].update,
             SessionUpdate::ToolCallUpdate(_)
         ));
-        assert!(matches!(notifications[1].update, SessionUpdate::Plan(_)));
     }
 
     #[test]

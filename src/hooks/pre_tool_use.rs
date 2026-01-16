@@ -16,6 +16,7 @@ use sacp::{JrConnectionCx, link::AgentToClient};
 use tokio::sync::RwLock;
 use tracing::Instrument;
 
+use crate::command_safety::{command_might_be_dangerous, is_known_safe_command};
 use crate::session::PermissionMode;
 use crate::settings::PermissionChecker;
 
@@ -36,7 +37,9 @@ use crate::settings::PermissionChecker;
 /// - **BypassPermissions/AcceptEdits**: Allows all tools without checking rules
 ///   (AcceptEdits behaves like BypassPermissions for root compatibility)
 /// - **Plan**: Blocks write operations (Edit, Write, Bash, NotebookEdit)
-/// - **Default/DontAsk**: Checks settings rules and mode-based auto-approval
+/// - **Default**: Auto-allows read-only operations (Read, Grep, Glob, LS, NotebookRead),
+///   checks settings rules for other tools
+/// - **DontAsk**: Checks settings rules and mode-based auto-approval
 ///
 /// # Architecture
 ///
@@ -164,10 +167,14 @@ pub fn create_pre_tool_use_hook(
                         });
                     }
 
+                    // Strip mcp__acp__ prefix for consistent tool name matching
+                    let stripped_tool_name =
+                        tool_name.strip_prefix("mcp__acp__").unwrap_or(&tool_name);
+
                     // Plan mode: block write operations
                     if mode == PermissionMode::Plan {
                         let is_write_operation = matches!(
-                            tool_name.as_str(),
+                            stripped_tool_name,
                             "Edit" | "Write" | "Bash" | "NotebookEdit"
                         );
                         if is_write_operation {
@@ -216,6 +223,82 @@ pub fn create_pre_tool_use_hook(
                             )),
                             ..Default::default()
                         });
+                    }
+
+                    // Default mode: auto-allow read-only operations
+                    // This allows tools like Read, Grep, Glob, LS, NotebookRead to execute without permission prompt
+                    if mode == PermissionMode::Default {
+                        let is_read_only = matches!(
+                            stripped_tool_name,
+                            "Read" | "Grep" | "Glob" | "LS" | "NotebookRead"
+                        );
+                        if is_read_only {
+                            let elapsed = start_time.elapsed();
+                            tracing::debug!(
+                                tool_name = %tool_name,
+                                tool_use_id = ?tool_use_id,
+                                mode = "default",
+                                elapsed_us = elapsed.as_micros(),
+                                "Tool auto-allowed in Default mode (read-only operation)"
+                            );
+                            return HookJsonOutput::Sync(SyncHookJsonOutput {
+                                continue_: Some(true),
+                                hook_specific_output: Some(HookSpecificOutput::PreToolUse(
+                                    PreToolUseHookSpecificOutput {
+                                        permission_decision: Some("allow".to_string()),
+                                        permission_decision_reason: Some(
+                                            "Auto-allowed in Default mode (read-only operation)"
+                                                .to_string(),
+                                        ),
+                                        updated_input: None,
+                                    },
+                                )),
+                                ..Default::default()
+                            });
+                        }
+
+                        // Check Bash commands for known safe commands (auto-allow)
+                        if stripped_tool_name == "Bash" {
+                            if let Some(cmd) = tool_input.get("command").and_then(|v| v.as_str()) {
+                                // Check if this is a known safe command
+                                if is_known_safe_command(cmd) {
+                                    let elapsed = start_time.elapsed();
+                                    tracing::info!(
+                                        tool_name = %tool_name,
+                                        command = %cmd,
+                                        tool_use_id = ?tool_use_id,
+                                        mode = "default",
+                                        elapsed_us = elapsed.as_micros(),
+                                        "Bash command auto-allowed (known safe command)"
+                                    );
+                                    return HookJsonOutput::Sync(SyncHookJsonOutput {
+                                        continue_: Some(true),
+                                        hook_specific_output: Some(HookSpecificOutput::PreToolUse(
+                                            PreToolUseHookSpecificOutput {
+                                                permission_decision: Some("allow".to_string()),
+                                                permission_decision_reason: Some(format!(
+                                                    "Auto-allowed: known safe command ({})",
+                                                    cmd.split_whitespace().next().unwrap_or("")
+                                                )),
+                                                updated_input: None,
+                                            },
+                                        )),
+                                        ..Default::default()
+                                    });
+                                }
+
+                                // Check if this is a dangerous command (log warning for user awareness)
+                                if command_might_be_dangerous(cmd) {
+                                    tracing::warn!(
+                                        tool_name = %tool_name,
+                                        command = %cmd,
+                                        tool_use_id = ?tool_use_id,
+                                        "Bash command flagged as potentially dangerous"
+                                    );
+                                    // Continue to normal permission flow - user will be asked
+                                }
+                            }
+                        }
                     }
 
                     // Check permission (if checker is available, otherwise default to Ask)
@@ -666,6 +749,212 @@ mod tests {
                 } else {
                     panic!("Expected PreToolUse specific output");
                 }
+            }
+            HookJsonOutput::Async(_) => panic!("Expected sync output"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_default_mode_auto_allows_read_only_tools() {
+        // Default mode should auto-allow read-only operations (Read, Grep, Glob, LS, NotebookRead)
+        // even without explicit allow rules
+        let checker = make_permission_checker(PermissionSettings::default()); // No rules
+
+        let hook = make_test_hook_with_mode(checker, PermissionMode::Default);
+
+        // Test Read tool
+        let input_read = HookInput::PreToolUse(claude_code_agent_sdk::PreToolUseHookInput {
+            session_id: "test".to_string(),
+            transcript_path: "/tmp/test".to_string(),
+            cwd: "/tmp".to_string(),
+            permission_mode: None,
+            tool_name: "Read".to_string(),
+            tool_input: json!({"file_path": "/tmp/test.txt"}),
+        });
+
+        let result = hook(input_read, None, HookContext::default()).await;
+        match result {
+            HookJsonOutput::Sync(output) => {
+                assert_eq!(output.continue_, Some(true));
+                if let Some(HookSpecificOutput::PreToolUse(specific)) = output.hook_specific_output
+                {
+                    assert_eq!(specific.permission_decision, Some("allow".to_string()));
+                    assert!(
+                        specific
+                            .permission_decision_reason
+                            .unwrap()
+                            .contains("read-only")
+                    );
+                } else {
+                    panic!("Expected PreToolUse specific output");
+                }
+            }
+            HookJsonOutput::Async(_) => panic!("Expected sync output"),
+        }
+
+        // Test LS tool
+        let input_ls = HookInput::PreToolUse(claude_code_agent_sdk::PreToolUseHookInput {
+            session_id: "test".to_string(),
+            transcript_path: "/tmp/test".to_string(),
+            cwd: "/tmp".to_string(),
+            permission_mode: None,
+            tool_name: "LS".to_string(),
+            tool_input: json!({"path": "/tmp"}),
+        });
+
+        let result_ls = hook(input_ls, None, HookContext::default()).await;
+        match result_ls {
+            HookJsonOutput::Sync(output) => {
+                assert_eq!(output.continue_, Some(true));
+                if let Some(HookSpecificOutput::PreToolUse(specific)) = output.hook_specific_output
+                {
+                    assert_eq!(specific.permission_decision, Some("allow".to_string()));
+                } else {
+                    panic!("Expected PreToolUse specific output for LS");
+                }
+            }
+            HookJsonOutput::Async(_) => panic!("Expected sync output"),
+        }
+
+        // Test Grep tool with mcp__acp__ prefix
+        let input_grep = HookInput::PreToolUse(claude_code_agent_sdk::PreToolUseHookInput {
+            session_id: "test".to_string(),
+            transcript_path: "/tmp/test".to_string(),
+            cwd: "/tmp".to_string(),
+            permission_mode: None,
+            tool_name: "mcp__acp__Grep".to_string(),
+            tool_input: json!({"pattern": "test", "path": "/tmp"}),
+        });
+
+        let result_grep = hook(input_grep, None, HookContext::default()).await;
+        match result_grep {
+            HookJsonOutput::Sync(output) => {
+                assert_eq!(output.continue_, Some(true));
+                if let Some(HookSpecificOutput::PreToolUse(specific)) = output.hook_specific_output
+                {
+                    assert_eq!(specific.permission_decision, Some("allow".to_string()));
+                } else {
+                    panic!("Expected PreToolUse specific output for Grep");
+                }
+            }
+            HookJsonOutput::Async(_) => panic!("Expected sync output"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_default_mode_auto_allows_safe_bash_commands() {
+        // Default mode should auto-allow known safe Bash commands
+        let checker = make_permission_checker(PermissionSettings::default()); // No rules
+
+        let hook = make_test_hook_with_mode(checker, PermissionMode::Default);
+
+        // Test with a safe command (ls is in the safe command whitelist)
+        let input = HookInput::PreToolUse(claude_code_agent_sdk::PreToolUseHookInput {
+            session_id: "test".to_string(),
+            transcript_path: "/tmp/test".to_string(),
+            cwd: "/tmp".to_string(),
+            permission_mode: None,
+            tool_name: "Bash".to_string(),
+            tool_input: json!({"command": "ls -la /tmp"}),
+        });
+
+        let result = hook(input, None, HookContext::default()).await;
+        match result {
+            HookJsonOutput::Sync(output) => {
+                assert_eq!(output.continue_, Some(true));
+                if let Some(HookSpecificOutput::PreToolUse(specific)) = output.hook_specific_output
+                {
+                    assert_eq!(specific.permission_decision, Some("allow".to_string()));
+                    assert!(
+                        specific
+                            .permission_decision_reason
+                            .as_ref()
+                            .unwrap()
+                            .contains("known safe command"),
+                        "Expected 'known safe command' in reason"
+                    );
+                } else {
+                    panic!("Expected PreToolUse specific output for safe Bash command");
+                }
+            }
+            HookJsonOutput::Async(_) => panic!("Expected sync output"),
+        }
+
+        // Test with find (conditionally safe without dangerous options)
+        let input_find = HookInput::PreToolUse(claude_code_agent_sdk::PreToolUseHookInput {
+            session_id: "test".to_string(),
+            transcript_path: "/tmp/test".to_string(),
+            cwd: "/tmp".to_string(),
+            permission_mode: None,
+            tool_name: "Bash".to_string(),
+            tool_input: json!({"command": "find . -name '*.rs'"}),
+        });
+
+        let result_find = hook(input_find, None, HookContext::default()).await;
+        match result_find {
+            HookJsonOutput::Sync(output) => {
+                assert_eq!(output.continue_, Some(true));
+                if let Some(HookSpecificOutput::PreToolUse(specific)) = output.hook_specific_output
+                {
+                    assert_eq!(specific.permission_decision, Some("allow".to_string()));
+                } else {
+                    panic!("Expected PreToolUse specific output for safe find command");
+                }
+            }
+            HookJsonOutput::Async(_) => panic!("Expected sync output"),
+        }
+
+        // Test with git status (safe git subcommand)
+        let input_git = HookInput::PreToolUse(claude_code_agent_sdk::PreToolUseHookInput {
+            session_id: "test".to_string(),
+            transcript_path: "/tmp/test".to_string(),
+            cwd: "/tmp".to_string(),
+            permission_mode: None,
+            tool_name: "Bash".to_string(),
+            tool_input: json!({"command": "git status"}),
+        });
+
+        let result_git = hook(input_git, None, HookContext::default()).await;
+        match result_git {
+            HookJsonOutput::Sync(output) => {
+                assert_eq!(output.continue_, Some(true));
+                if let Some(HookSpecificOutput::PreToolUse(specific)) = output.hook_specific_output
+                {
+                    assert_eq!(specific.permission_decision, Some("allow".to_string()));
+                } else {
+                    panic!("Expected PreToolUse specific output for safe git command");
+                }
+            }
+            HookJsonOutput::Async(_) => panic!("Expected sync output"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_default_mode_asks_for_write_tools() {
+        // Default mode should ask for permission for write tools (Bash with non-safe commands, Edit, Write)
+        let checker = make_permission_checker(PermissionSettings::default()); // No rules
+
+        let hook = make_test_hook_with_mode(checker, PermissionMode::Default);
+
+        // Use a command that is NOT in the safe command list
+        let input = HookInput::PreToolUse(claude_code_agent_sdk::PreToolUseHookInput {
+            session_id: "test".to_string(),
+            transcript_path: "/tmp/test".to_string(),
+            cwd: "/tmp".to_string(),
+            permission_mode: None,
+            tool_name: "Bash".to_string(),
+            tool_input: json!({"command": "mkdir new_dir"}),  // mkdir is not a safe command
+        });
+
+        let result = hook(input, None, HookContext::default()).await;
+        match result {
+            HookJsonOutput::Sync(output) => {
+                // Ask decision returns continue=true with no hook_specific_output
+                assert_eq!(output.continue_, Some(true));
+                assert!(
+                    output.hook_specific_output.is_none(),
+                    "Bash with non-safe command should trigger Ask decision, not auto-allow"
+                );
             }
             HookJsonOutput::Async(_) => panic!("Expected sync output"),
         }

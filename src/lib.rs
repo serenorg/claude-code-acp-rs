@@ -69,6 +69,7 @@
 
 pub mod agent;
 pub mod cli;
+pub mod command_safety;
 pub mod converter;
 pub mod hooks;
 pub mod mcp;

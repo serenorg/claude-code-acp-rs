@@ -6,6 +6,7 @@ use std::path::{Path, PathBuf};
 
 use super::manager::Settings;
 use super::rule::{ParsedRule, PermissionCheckResult};
+use crate::command_safety::extract_command_basename;
 
 /// Permission checker that evaluates tool permissions against settings rules
 #[derive(Debug)]
@@ -126,38 +127,33 @@ impl PermissionChecker {
         self.allow_rules.push((rule.to_string(), parsed));
     }
 
-    /// Add a runtime allow rule based on a specific tool call (fine-grained)
+    /// Add a runtime allow rule for "Always Allow" permission decision
     ///
-    /// This generates a rule based on the actual tool invocation, providing
-    /// finer-grained permissions. For example:
-    /// - Bash: generates `Bash(command_prefix:*)` instead of just `Bash`
-    /// - Read/Edit/Write: generates `Tool(directory/**)` for the file's directory
+    /// For Bash tool: extracts the command name (first word) and generates
+    /// a rule like `Bash(find:*)` that allows all invocations of that command
+    /// regardless of arguments or paths.
+    ///
+    /// For file operations (Read/Edit/Write): generates a directory-based rule
+    /// that allows operations in the same directory tree.
+    ///
+    /// This provides reasonable granularity:
+    /// - `find /path1` → rule `Bash(find:*)` → allows all `find` commands
+    /// - `ls /path` → not matched → needs separate permission
     pub fn add_allow_rule_for_tool_call(
         &mut self,
         tool_name: &str,
         tool_input: &serde_json::Value,
     ) {
-        let rule = self.generate_rule_from_call(tool_name, tool_input);
-        tracing::info!(
-            tool_name = %tool_name,
-            generated_rule = %rule,
-            "Adding fine-grained allow rule"
-        );
-        let parsed = ParsedRule::parse_with_glob(&rule, &self.cwd);
-        self.allow_rules.push((rule, parsed));
-    }
-
-    /// Generate a permission rule string from a tool call
-    fn generate_rule_from_call(&self, tool_name: &str, tool_input: &serde_json::Value) -> String {
+        // Strip mcp__acp__ prefix for consistent rule matching
         let stripped = tool_name.strip_prefix("mcp__acp__").unwrap_or(tool_name);
 
-        match stripped {
+        let rule = match stripped {
             "Bash" => {
-                // Extract command and generate prefix rule
+                // Extract command name (first word only) for Bash
                 if let Some(cmd) = tool_input.get("command").and_then(|v| v.as_str()) {
-                    let prefix = Self::extract_command_prefix(cmd);
-                    if !prefix.is_empty() {
-                        format!("Bash({}:*)", prefix) // e.g., "Bash(cargo build:*)"
+                    let cmd_name = Self::extract_command_name(cmd);
+                    if !cmd_name.is_empty() {
+                        format!("Bash({}:*)", cmd_name) // e.g., "Bash(find:*)"
                     } else {
                         stripped.to_string()
                     }
@@ -166,21 +162,34 @@ impl PermissionChecker {
                 }
             }
             "Read" | "Grep" | "Glob" | "LS" => {
-                // Extract file path and generate directory rule
+                // For read operations, generate directory-based rule
                 Self::generate_file_rule("Read", tool_input, &self.cwd)
             }
             "Edit" | "Write" => {
-                // Extract file path and generate directory rule
+                // For write operations, generate directory-based rule
                 Self::generate_file_rule(stripped, tool_input, &self.cwd)
             }
             _ => stripped.to_string(),
-        }
+        };
+
+        tracing::info!(
+            tool_name = %tool_name,
+            generated_rule = %rule,
+            "Adding allow rule for Always Allow"
+        );
+
+        let parsed = ParsedRule::parse_with_glob(&rule, &self.cwd);
+        self.allow_rules.push((rule, parsed));
     }
 
-    /// Extract command prefix (first two space-separated parts)
-    fn extract_command_prefix(cmd: &str) -> String {
-        let parts: Vec<&str> = cmd.split_whitespace().take(2).collect();
-        parts.join(" ")
+    /// Extract command name (basename only) from a shell command
+    ///
+    /// Supports both simple commands and full path commands:
+    /// - `find /path -name "*.rs"` → `find`
+    /// - `/usr/bin/find . -name "*.rs"` → `find`
+    /// - `ls -la /tmp` → `ls`
+    fn extract_command_name(cmd: &str) -> String {
+        extract_command_basename(cmd).to_string()
     }
 
     /// Generate a file-based permission rule
@@ -437,26 +446,33 @@ mod tests {
     fn test_add_allow_rule_for_bash_command() {
         let mut checker = PermissionChecker::new(Settings::default(), "/tmp");
 
-        // Add rule for specific bash command
-        checker.add_allow_rule_for_tool_call("Bash", &json!({"command": "cargo build --release"}));
+        // Add rule for specific bash command (find)
+        checker.add_allow_rule_for_tool_call("Bash", &json!({"command": "find /path1 -name '*.rs'"}));
 
-        // Should allow the same command
+        // Should allow ANY find command (same command name)
         assert_eq!(
             checker
-                .check_permission("Bash", &json!({"command": "cargo build --release"}))
+                .check_permission("Bash", &json!({"command": "find /different/path -type f"}))
                 .decision,
             PermissionDecision::Allow
         );
 
-        // Should allow similar commands (prefix match)
+        // Should allow find with different arguments
         assert_eq!(
             checker
-                .check_permission("Bash", &json!({"command": "cargo build --debug"}))
+                .check_permission("Bash", &json!({"command": "find . -name '*.txt' -delete"}))
                 .decision,
             PermissionDecision::Allow
         );
 
-        // Should NOT allow completely different commands
+        // Should NOT allow different commands (ls, rm, etc.)
+        assert_eq!(
+            checker
+                .check_permission("Bash", &json!({"command": "ls -la /tmp"}))
+                .decision,
+            PermissionDecision::Ask
+        );
+
         assert_eq!(
             checker
                 .check_permission("Bash", &json!({"command": "rm -rf /"}))
@@ -527,17 +543,30 @@ mod tests {
     }
 
     #[test]
-    fn test_extract_command_prefix() {
-        // Should extract first two parts
+    fn test_extract_command_name() {
+        // Should extract only the command name (basename)
         assert_eq!(
-            PermissionChecker::extract_command_prefix("cargo build --release"),
-            "cargo build"
+            PermissionChecker::extract_command_name("cargo build --release"),
+            "cargo"
         );
         assert_eq!(
-            PermissionChecker::extract_command_prefix("npm run"),
-            "npm run"
+            PermissionChecker::extract_command_name("find /path -name '*.rs'"),
+            "find"
         );
-        assert_eq!(PermissionChecker::extract_command_prefix("ls"), "ls");
-        assert_eq!(PermissionChecker::extract_command_prefix(""), "");
+        assert_eq!(
+            PermissionChecker::extract_command_name("ls -la /tmp"),
+            "ls"
+        );
+        assert_eq!(PermissionChecker::extract_command_name("npm"), "npm");
+        assert_eq!(PermissionChecker::extract_command_name(""), "");
+        // Full path commands should return just the basename
+        assert_eq!(
+            PermissionChecker::extract_command_name("/usr/bin/find . -name '*.rs'"),
+            "find"
+        );
+        assert_eq!(
+            PermissionChecker::extract_command_name("/usr/local/bin/cargo build"),
+            "cargo"
+        );
     }
 }

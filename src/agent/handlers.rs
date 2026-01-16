@@ -359,6 +359,9 @@ pub async fn handle_prompt(
     let mut notification_count = 0u64;
     let mut error_count = 0u64;
 
+    // Track last ResultMessage for determining stop reason
+    let mut last_result: Option<claude_code_agent_sdk::ResultMessage> = None;
+
     // Process streaming responses
     let stream_start = Instant::now();
     loop {
@@ -420,7 +423,7 @@ pub async fn handle_prompt(
                 notification_count = notification_count,
                 "Prompt cancelled by user"
             );
-            return Ok(PromptResponse::new(StopReason::EndTurn));
+            return Ok(PromptResponse::new(StopReason::Cancelled));
         }
 
         // Process next message from stream with timeout
@@ -439,6 +442,19 @@ pub async fn handle_prompt(
                     msg_type = %msg_type.chars().take(50).collect::<String>(),
                     "Received message from SDK"
                 );
+
+                // Track ResultMessage for stop reason determination
+                if let claude_code_agent_sdk::Message::Result(ref result) = message {
+                    tracing::info!(
+                        session_id = %session_id,
+                        subtype = %result.subtype,
+                        is_error = result.is_error,
+                        duration_ms = result.duration_ms,
+                        num_turns = result.num_turns,
+                        "Received ResultMessage from Claude CLI"
+                    );
+                    last_result = Some(result.clone());
+                }
 
                 // Convert SDK message to ACP notifications
                 let notifications = converter.convert_message(&message, session_id);
@@ -513,8 +529,73 @@ pub async fn handle_prompt(
     let wait_ms = (10 + notification_count.saturating_mul(2)).min(100);
     tokio::time::sleep(tokio::time::Duration::from_millis(wait_ms)).await;
 
-    // Build response - ACP PromptResponse just has stop_reason
-    Ok(PromptResponse::new(StopReason::EndTurn))
+    // Determine stop reason based on session state and ResultMessage
+    // Reference: vendors/claude-code-acp/src/acp-agent.ts lines 286-323
+    if session.is_cancelled() {
+        tracing::info!(session_id = %session_id, "Returning Cancelled stop reason");
+        return Ok(PromptResponse::new(StopReason::Cancelled));
+    }
+
+    if let Some(ref result) = last_result {
+        // Check is_error first - TS throws error when is_error=true
+        if result.is_error {
+            let error_msg = result
+                .result
+                .clone()
+                .unwrap_or_else(|| result.subtype.clone());
+            tracing::error!(
+                session_id = %session_id,
+                subtype = %result.subtype,
+                is_error = result.is_error,
+                error_msg = %error_msg,
+                "Query completed with is_error=true, returning error"
+            );
+            // Match TS behavior: throw RequestError.internalError
+            return Err(AgentError::Internal(format!(
+                "Query failed: {} (subtype: {})",
+                error_msg, result.subtype
+            )));
+        }
+
+        // Determine stop reason based on subtype
+        let stop_reason = match result.subtype.as_str() {
+            "success" | "error_during_execution" => {
+                tracing::debug!(
+                    session_id = %session_id,
+                    subtype = %result.subtype,
+                    "Returning EndTurn for result subtype"
+                );
+                StopReason::EndTurn
+            }
+            "error_max_budget_usd" | "error_max_turns" | "error_max_structured_output_retries" => {
+                tracing::info!(
+                    session_id = %session_id,
+                    subtype = %result.subtype,
+                    "Returning MaxTurnRequests for max limit subtype"
+                );
+                StopReason::MaxTurnRequests
+            }
+            _ => {
+                tracing::warn!(
+                    session_id = %session_id,
+                    subtype = %result.subtype,
+                    "Unknown result subtype, returning EndTurn"
+                );
+                StopReason::EndTurn
+            }
+        };
+        return Ok(PromptResponse::new(stop_reason));
+    }
+
+    // No ResultMessage received - stream ended unexpectedly
+    // TS throws: "Session did not end in result"
+    tracing::error!(
+        session_id = %session_id,
+        "Stream ended without ResultMessage, returning error"
+    );
+    Err(AgentError::Internal(
+        "Session did not end in result".to_string(),
+    ))
 }
 
 /// Send a notification via the connection context

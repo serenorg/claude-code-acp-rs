@@ -105,34 +105,42 @@ pub fn extract_tool_info(name: &str, input: &serde_json::Value, cwd: Option<&Pat
                 .unwrap_or("file");
 
             // Get offset and limit for line range display
+            // TypeScript uses 1-indexed display: "Read path (1 - 50)"
+            // Reference: vendors/claude-code-acp/src/tools.ts:207-227
             let offset = input.get("offset").and_then(|v| v.as_u64());
             let limit = input.get("limit").and_then(|v| v.as_u64());
 
             let title = if let (Some(start), Some(count)) = (offset, limit) {
                 if count == 0 {
                     // Edge case: limit=0 means "from this line onward"
+                    // Use 1-indexed display
+                    let display_start = start.saturating_add(1);
                     format!(
                         "Read {} (from line {})",
                         truncate_path(path, cwd_path),
-                        start
+                        display_start
                     )
                 } else {
-                    // Show line range: "Read file.rs (lines 100-149)"
+                    // Show line range: "Read file.rs (1 - 50)"
+                    // TypeScript uses 1-indexed format: (start+1 - start+count)
                     // Use saturating arithmetic to prevent overflow
-                    let end = start.saturating_add(count).saturating_sub(1);
+                    let display_start = start.saturating_add(1);
+                    let display_end = start.saturating_add(count);
                     format!(
-                        "Read {} (lines {}-{})",
+                        "Read {} ({} - {})",
                         truncate_path(path, cwd_path),
-                        start,
-                        end
+                        display_start,
+                        display_end
                     )
                 }
             } else if let Some(start) = offset {
-                // Show start line: "Read file.rs (from line 100)"
+                // Show start line: "Read file.rs (from line 101)"
+                // Use 1-indexed display
+                let display_start = start.saturating_add(1);
                 format!(
                     "Read {} (from line {})",
                     truncate_path(path, cwd_path),
-                    start
+                    display_start
                 )
             } else {
                 // Just show path: "Read file.rs"
@@ -162,11 +170,17 @@ pub fn extract_tool_info(name: &str, input: &serde_json::Value, cwd: Option<&Pat
 
         "Bash" => {
             let cmd = input.get("command").and_then(|v| v.as_str()).unwrap_or("");
-            let desc = input.get("description").and_then(|v| v.as_str());
 
-            let title = desc
-                .map(String::from)
-                .unwrap_or_else(|| format!("Run: {}", truncate_string(cmd, 50)));
+            // Reference: vendors/claude-code-acp/src/tools.ts:97-111
+            // TypeScript always uses the command as title (wrapped in backticks)
+            // The description goes into content[], not title
+            let title = if cmd.is_empty() {
+                "Terminal".to_string()
+            } else {
+                // Escape backticks in command to avoid breaking markdown
+                let escaped_cmd = cmd.replace('`', "\\`");
+                format!("`{}`", truncate_string(&escaped_cmd, 50))
+            };
 
             ToolInfo::new(title, ToolKind::Execute)
         }
@@ -190,8 +204,20 @@ pub fn extract_tool_info(name: &str, input: &serde_json::Value, cwd: Option<&Pat
 
         "LS" => {
             let path = input.get("path").and_then(|v| v.as_str()).unwrap_or(".");
-            let title = format!("List {}", truncate_path(path, cwd_path));
+            // Reference: vendors/claude-code-acp/src/tools.ts:241
+            // TypeScript uses: "List the 'path' directory's contents"
+            let title = format!("List the '{}' directory's contents", truncate_path(path, cwd_path));
             ToolInfo::new(title, ToolKind::Search)
+        }
+
+        "BashOutput" => {
+            // Reference: vendors/claude-code-acp/src/tools.ts:344
+            ToolInfo::new("Tail Logs", ToolKind::Execute)
+        }
+
+        "KillShell" => {
+            // Reference: vendors/claude-code-acp/src/tools.ts:347
+            ToolInfo::new("Kill Process", ToolKind::Execute)
         }
 
         "WebFetch" => {
@@ -349,6 +375,8 @@ mod tests {
 
     #[test]
     fn test_extract_bash_tool_info() {
+        // Reference: vendors/claude-code-acp/src/tools.ts:97-111
+        // TypeScript always uses command as title, description goes to content[]
         let input = json!({
             "command": "cargo build",
             "description": "Build the project"
@@ -356,16 +384,39 @@ mod tests {
         let info = extract_tool_info("Bash", &input, None);
 
         assert_eq!(info.kind, ToolKind::Execute);
-        assert_eq!(info.title, "Build the project");
+        // Title should be the command, not the description
+        assert_eq!(info.title, "`cargo build`");
     }
 
     #[test]
     fn test_extract_bash_tool_info_no_description() {
+        // Reference: vendors/claude-code-acp/src/tools.ts:97-111
+        // TypeScript wraps command in backticks: `command`
         let input = json!({"command": "cargo test --release"});
         let info = extract_tool_info("Bash", &input, None);
 
         assert_eq!(info.kind, ToolKind::Execute);
-        assert!(info.title.starts_with("Run:"));
+        assert_eq!(info.title, "`cargo test --release`");
+    }
+
+    #[test]
+    fn test_extract_bash_tool_info_empty_command() {
+        // When command is empty, show "Terminal"
+        let input = json!({});
+        let info = extract_tool_info("Bash", &input, None);
+
+        assert_eq!(info.kind, ToolKind::Execute);
+        assert_eq!(info.title, "Terminal");
+    }
+
+    #[test]
+    fn test_extract_bash_tool_info_with_backticks() {
+        // Backticks in command should be escaped
+        let input = json!({"command": "echo `date`"});
+        let info = extract_tool_info("Bash", &input, None);
+
+        assert_eq!(info.kind, ToolKind::Execute);
+        assert_eq!(info.title, "`echo \\`date\\``");
     }
 
     #[test]
@@ -444,6 +495,8 @@ mod tests {
 
     #[test]
     fn test_extract_read_tool_info_with_line_range() {
+        // TypeScript uses 1-indexed format: "Read file.rs (101 - 150)"
+        // Reference: vendors/claude-code-acp/src/tools.ts:207-227
         let input = json!({
             "file_path": "/path/to/file.rs",
             "offset": 100,
@@ -454,11 +507,12 @@ mod tests {
         assert_eq!(info.kind, ToolKind::Read);
         assert!(info.title.contains("Read"));
         assert!(info.title.contains("file.rs"));
-        assert!(info.title.contains("100-149")); // end = 100 + 50 - 1
+        assert!(info.title.contains("101 - 150")); // 1-indexed: (100+1) - (100+50)
     }
 
     #[test]
     fn test_extract_read_tool_info_with_offset_only() {
+        // TypeScript uses 1-indexed display
         let input = json!({
             "file_path": "/path/to/file.rs",
             "offset": 200
@@ -468,7 +522,7 @@ mod tests {
         assert_eq!(info.kind, ToolKind::Read);
         assert!(info.title.contains("Read"));
         assert!(info.title.contains("file.rs"));
-        assert!(info.title.contains("from line 200"));
+        assert!(info.title.contains("from line 201")); // 1-indexed: 200+1
     }
 
     #[test]
@@ -498,6 +552,7 @@ mod tests {
     #[test]
     fn test_extract_read_tool_info_limit_zero() {
         // Edge case: limit=0 should show "from line X" instead of range
+        // TypeScript uses 1-indexed display
         let input = json!({
             "file_path": "/path/to/file.rs",
             "offset": 100,
@@ -507,8 +562,8 @@ mod tests {
 
         assert_eq!(info.kind, ToolKind::Read);
         assert!(info.title.contains("Read"));
-        assert!(info.title.contains("from line 100"));
-        assert!(!info.title.contains("lines")); // Should NOT show range
+        assert!(info.title.contains("from line 101")); // 1-indexed: 100+1
+        assert!(!info.title.contains(" - ")); // Should NOT show range
     }
 
     #[test]
@@ -529,7 +584,7 @@ mod tests {
 
     #[test]
     fn test_extract_read_tool_info_offset_zero() {
-        // Edge case: offset=0 (should be treated as line 0 in 1-indexed system)
+        // TypeScript uses 1-indexed display: offset=0 shows (1 - 10)
         let input = json!({
             "file_path": "/path/to/file.rs",
             "offset": 0,
@@ -539,7 +594,7 @@ mod tests {
 
         assert_eq!(info.kind, ToolKind::Read);
         assert!(info.title.contains("Read"));
-        assert!(info.title.contains("0-9")); // 0 + 10 - 1 = 9
+        assert!(info.title.contains("1 - 10")); // 1-indexed: (0+1) - (0+10)
     }
 
     #[test]

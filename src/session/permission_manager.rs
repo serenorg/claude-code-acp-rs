@@ -39,6 +39,18 @@ pub struct PendingPermissionRequest {
     pub response_tx: tokio::sync::oneshot::Sender<PermissionManagerDecision>,
 }
 
+impl std::fmt::Debug for PendingPermissionRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PendingPermissionRequest")
+            .field("tool_name", &self.tool_name)
+            .field("tool_input", &self.tool_input)
+            .field("tool_call_id", &self.tool_call_id)
+            .field("session_id", &self.session_id)
+            .field("response_tx", &"<oneshot::Sender>")
+            .finish()
+    }
+}
+
 /// Permission Manager - handles permission requests in background tasks
 ///
 /// # Architecture
@@ -64,6 +76,15 @@ pub struct PermissionManager {
     /// for future interactive permission dialog implementation.
     #[allow(dead_code)]
     connection_cx: Arc<JrConnectionCx<AgentToClient>>,
+}
+
+impl std::fmt::Debug for PermissionManager {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PermissionManager")
+            .field("pending_requests", &"<mpsc::UnboundedSender>")
+            .field("connection_cx", &"<JrConnectionCx>")
+            .finish()
+    }
 }
 
 impl PermissionManager {

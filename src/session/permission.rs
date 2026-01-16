@@ -196,7 +196,7 @@ impl PermissionHandler {
             }
             PermissionMode::Plan => {
                 // Only allow read operations in plan mode
-                matches!(tool_name, "Read" | "Glob" | "Grep" | "NotebookRead")
+                matches!(tool_name, "Read" | "Glob" | "Grep" | "LS" | "NotebookRead")
             }
             PermissionMode::DontAsk => {
                 // DontAsk mode: only pre-approved tools via settings rules
@@ -205,7 +205,7 @@ impl PermissionHandler {
             }
             PermissionMode::Default => {
                 // Only auto-approve read operations
-                matches!(tool_name, "Read" | "Glob" | "Grep" | "NotebookRead")
+                matches!(tool_name, "Read" | "Glob" | "Grep" | "LS" | "NotebookRead")
             }
         }
     }
@@ -350,6 +350,9 @@ mod tests {
         // Default mode (PermissionMode::Default) auto-approves reads
         assert!(handler.should_auto_approve("Read", &input));
         assert!(handler.should_auto_approve("Glob", &input));
+        assert!(handler.should_auto_approve("Grep", &input));
+        assert!(handler.should_auto_approve("LS", &input));
+        assert!(handler.should_auto_approve("NotebookRead", &input));
         // But not writes - these require permission
         assert!(!handler.should_auto_approve("Edit", &input));
         assert!(!handler.should_auto_approve("Bash", &input));
@@ -386,11 +389,16 @@ mod tests {
 
         // Only reads auto-approved
         assert!(handler.should_auto_approve("Read", &input));
+        assert!(handler.should_auto_approve("Glob", &input));
+        assert!(handler.should_auto_approve("Grep", &input));
+        assert!(handler.should_auto_approve("LS", &input));
+        assert!(handler.should_auto_approve("NotebookRead", &input));
         assert!(!handler.should_auto_approve("Edit", &input));
 
         // Writes are blocked
         assert!(handler.is_tool_blocked("Edit"));
         assert!(handler.is_tool_blocked("Bash"));
         assert!(!handler.is_tool_blocked("Read"));
+        assert!(!handler.is_tool_blocked("LS"));
     }
 }
