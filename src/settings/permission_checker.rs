@@ -152,10 +152,10 @@ impl PermissionChecker {
                 // Extract command name (first word only) for Bash
                 if let Some(cmd) = tool_input.get("command").and_then(|v| v.as_str()) {
                     let cmd_name = Self::extract_command_name(cmd);
-                    if !cmd_name.is_empty() {
-                        format!("Bash({}:*)", cmd_name) // e.g., "Bash(find:*)"
-                    } else {
+                    if cmd_name.is_empty() {
                         stripped.to_string()
+                    } else {
+                        format!("Bash({}:*)", cmd_name) // e.g., "Bash(find:*)"
                     }
                 } else {
                     stripped.to_string()

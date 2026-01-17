@@ -30,6 +30,9 @@ use crate::session::BackgroundProcessManager;
 use crate::settings::PermissionChecker;
 use crate::terminal::TerminalClient;
 
+/// Type alias for the cancel callback to reduce type complexity
+type CancelCallback = Arc<Mutex<Option<Box<dyn Fn() + Send + Sync>>>>;
+
 /// ACP-integrated MCP server
 ///
 /// This server implements the SDK's `SdkMcpServer` trait, allowing it to be
@@ -65,7 +68,7 @@ pub struct AcpMcpServer {
     permission_checker: OnceLock<Arc<RwLock<PermissionChecker>>>,
     /// Cancel callback - called when MCP cancellation notification is received
     /// Uses Mutex (not RwLock) because writes are rare and we need try_lock for deadlock safety
-    cancel_callback: Arc<Mutex<Option<Box<dyn Fn() + Send + Sync>>>>,
+    cancel_callback: CancelCallback,
 }
 
 impl std::fmt::Debug for AcpMcpServer {
@@ -73,7 +76,7 @@ impl std::fmt::Debug for AcpMcpServer {
         f.debug_struct("AcpMcpServer")
             .field("name", &self.name)
             .field("version", &self.version)
-            .finish()
+            .finish_non_exhaustive()
     }
 }
 
@@ -227,7 +230,7 @@ impl AcpMcpServer {
 
     /// Send a terminal update notification (instance method)
     #[allow(dead_code)]
-    async fn send_terminal_update(
+    fn send_terminal_update(
         &self,
         tool_use_id: &str,
         terminal_id: &str,
@@ -350,8 +353,9 @@ impl AcpMcpServer {
     ///
     /// IMPORTANT: This sends a ToolCall (not ToolCallUpdate) notification.
     /// Zed handles terminal in two ways:
-    /// 1. meta.terminal_info - creates and registers the terminal
-    /// 2. content[].Terminal - associates the terminal with the tool call UI
+    /// - meta.terminal_info - creates and registers the terminal
+    /// - content[].Terminal - associates the terminal with the tool call UI
+    ///
     /// Both are needed for terminal output to be displayed correctly.
     fn send_tool_call_with_meta(
         cx: &JrConnectionCx<AgentToClient>,
@@ -853,8 +857,7 @@ impl AcpMcpServer {
         };
 
         // Read stderr in a task
-        let stderr_task = if let Some(stderr) = stderr {
-            Some(tokio::spawn(async move {
+        let stderr_task = stderr.map(|stderr| tokio::spawn(async move {
                 let reader = BufReader::new(stderr);
                 let mut lines = reader.lines();
                 let mut collected = String::new();
@@ -864,10 +867,7 @@ impl AcpMcpServer {
                     collected.push('\n');
                 }
                 collected
-            }))
-        } else {
-            None
-        };
+            }));
 
         // Wait for command with timeout
         let timeout_duration = std::time::Duration::from_millis(timeout_ms);
@@ -1062,7 +1062,7 @@ impl SdkMcpServer for AcpMcpServer {
                     if m.as_object().map(|o| o.len()).unwrap_or(0) > 1 {
                         format!("{:?}", m)
                     } else {
-                        format!("{{claudecode/toolUseId}}")
+                        "{claudecode/toolUseId}".to_string()
                     }
                 });
 

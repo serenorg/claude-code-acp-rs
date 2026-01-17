@@ -5,7 +5,7 @@
 
 use std::sync::Arc;
 
-use crate::session::SessionManager;
+use crate::session::{PromptManager, SessionManager};
 use crate::types::AgentConfig;
 
 /// Claude ACP Agent
@@ -23,6 +23,8 @@ pub struct ClaudeAcpAgent {
     config: AgentConfig,
     /// Session manager for tracking active sessions
     sessions: Arc<SessionManager>,
+    /// Prompt manager for tracking and cancelling active prompts
+    prompt_manager: Arc<PromptManager>,
 }
 
 impl ClaudeAcpAgent {
@@ -47,6 +49,7 @@ impl ClaudeAcpAgent {
         Self {
             config,
             sessions: Arc::new(SessionManager::new()),
+            prompt_manager: Arc::new(PromptManager::new()),
         }
     }
 
@@ -55,6 +58,7 @@ impl ClaudeAcpAgent {
         Self {
             config,
             sessions: Arc::new(SessionManager::new()),
+            prompt_manager: Arc::new(PromptManager::new()),
         }
     }
 
@@ -66,6 +70,11 @@ impl ClaudeAcpAgent {
     /// Get the session manager
     pub fn sessions(&self) -> &Arc<SessionManager> {
         &self.sessions
+    }
+
+    /// Get the prompt manager
+    pub fn prompt_manager(&self) -> &Arc<PromptManager> {
+        &self.prompt_manager
     }
 
     /// Get agent name for logging

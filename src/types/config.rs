@@ -137,6 +137,9 @@ impl AgentConfig {
     pub fn from_settings_or_env(project_dir: &std::path::Path) -> Self {
         use crate::settings::SettingsManager;
 
+        // Default max thinking tokens when always_thinking_enabled is true
+        const DEFAULT_MAX_THINKING_TOKENS: u32 = 20000;
+
         // Load settings from files (may fail if files don't exist)
         let settings = SettingsManager::new(project_dir)
             .map(|m| m.settings().clone())
@@ -144,7 +147,7 @@ impl AgentConfig {
 
         // Trace settings file discovery (debug level)
         // Check if settings.env has any configuration entries
-        let has_env_settings = settings.env.as_ref().map_or(false, |env| !env.is_empty());
+        let has_env_settings = settings.env.as_ref().is_some_and(|env| !env.is_empty());
         tracing::trace!(
             has_user_settings =
                 settings.model.is_some() || settings.api_base_url.is_some() || has_env_settings,
@@ -185,7 +188,7 @@ impl AgentConfig {
         // Resolve configuration with priority: Env > Settings (top-level) > Settings (env) > Default
         let base_url = std::env::var("ANTHROPIC_BASE_URL")
             .ok()
-            .or_else(|| settings.api_base_url.map(|u| u.to_string()))
+            .or(settings.api_base_url)
             .or_else(|| {
                 settings
                     .env
@@ -195,7 +198,7 @@ impl AgentConfig {
 
         let model = std::env::var("ANTHROPIC_MODEL")
             .ok()
-            .or_else(|| settings.model.map(|m| m.to_string()))
+            .or(settings.model)
             .or_else(|| {
                 settings
                     .env
@@ -205,7 +208,7 @@ impl AgentConfig {
 
         let small_fast_model = std::env::var("ANTHROPIC_SMALL_FAST_MODEL")
             .ok()
-            .or_else(|| settings.small_fast_model.map(|m| m.to_string()))
+            .or(settings.small_fast_model)
             .or_else(|| {
                 settings
                     .env
@@ -219,9 +222,6 @@ impl AgentConfig {
             .ok()
             .or_else(|| std::env::var("ANTHROPIC_AUTH_TOKEN").ok());
 
-        // Default max thinking tokens when always_thinking_enabled is true
-        const DEFAULT_MAX_THINKING_TOKENS: u32 = 20000;
-
         // Check if always_thinking_enabled is set in settings
         let always_thinking_enabled = settings.always_thinking_enabled.unwrap_or(false);
 
@@ -234,7 +234,7 @@ impl AgentConfig {
                         .and_then(|s| s.parse::<u32>().ok())
                 })
             })
-            .or_else(|| {
+            .or({
                 // If always_thinking_enabled is true and no MAX_THINKING_TOKENS is set,
                 // use the default value to enable extended thinking mode
                 if always_thinking_enabled {

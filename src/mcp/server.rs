@@ -148,8 +148,8 @@ impl McpServer {
         self.registry.schemas()
     }
 
-    /// Get all tool schemas including external MCP tools (async)
-    pub async fn all_tool_schemas(&self) -> Vec<ToolSchema> {
+    /// Get all tool schemas including external MCP tools
+    pub fn all_tool_schemas(&self) -> Vec<ToolSchema> {
         let mut schemas = self.registry.schemas();
         schemas.extend(self.external.all_tools());
         schemas
@@ -528,7 +528,7 @@ mod tests {
     #[tokio::test]
     async fn test_all_tool_schemas_includes_external() {
         let server = McpServer::new();
-        let schemas = server.all_tool_schemas().await;
+        let schemas = server.all_tool_schemas();
 
         // Should have built-in tools
         assert!(schemas.len() >= 17);

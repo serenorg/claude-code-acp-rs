@@ -10,7 +10,6 @@ use claude_code_agent_sdk::{
     ResultMessage, StreamEvent, ToolResultBlock, ToolResultContent, ToolUseBlock,
 };
 use dashmap::DashMap;
-use once_cell::sync::Lazy;
 use regex::Regex;
 use sacp::schema::{
     ContentBlock as AcpContentBlock, ContentChunk, Diff, ImageContent, Plan, PlanEntry,
@@ -25,13 +24,13 @@ use super::extract_tool_info;
 
 /// Static regex for finding backtick sequences at start of lines
 /// Used by markdown_escape to determine the appropriate escape sequence
-static BACKTICK_REGEX: Lazy<Regex> =
-    Lazy::new(|| Regex::new(r"(?m)^```+").expect("valid backtick regex"));
+static BACKTICK_REGEX: std::sync::LazyLock<Regex> =
+    std::sync::LazyLock::new(|| Regex::new(r"(?m)^```+").expect("valid backtick regex"));
 
 /// Static regex for removing SYSTEM_REMINDER blocks
 /// Matches <system-reminder>...</system-reminder> including multiline content
-static SYSTEM_REMINDER_REGEX: Lazy<Regex> =
-    Lazy::new(|| Regex::new(r"(?s)<system-reminder>.*?</system-reminder>").expect("valid system-reminder regex"));
+static SYSTEM_REMINDER_REGEX: std::sync::LazyLock<Regex> =
+    std::sync::LazyLock::new(|| Regex::new(r"(?s)<system-reminder>.*?</system-reminder>").expect("valid system-reminder regex"));
 
 /// Wrap text in markdown code block with appropriate number of backticks
 ///
@@ -171,7 +170,7 @@ impl NotificationConverter {
     fn convert_assistant_message(
         &self,
         assistant: &AssistantMessage,
-        _session_id: &SessionId,
+        session_id: &SessionId,
     ) -> Vec<SessionNotification> {
         let mut notifications = Vec::new();
 
@@ -188,7 +187,6 @@ impl NotificationConverter {
                 SdkContentBlock::ToolUse(tool_use) => {
                     // Cache the tool use for later correlation with result
                     self.cache_tool_use(tool_use);
-                    let session_id = _session_id;
                     // Special handling for TodoWrite: send Plan instead of ToolCall
                     // Reference: vendors/claude-code-acp/src/acp-agent.ts lines 1051-1058
                     let effective_name = tool_use
@@ -203,16 +201,14 @@ impl NotificationConverter {
                             continue;
                         }
                     }
-                    notifications.push(self.make_tool_call(&session_id, tool_use));
+                    notifications.push(self.make_tool_call(session_id, tool_use));
                 }
                 SdkContentBlock::ToolResult(tool_result) => {
-                    let session_id = _session_id;
-                    notifications.extend(self.make_tool_result(&session_id, tool_result));
+                    notifications.extend(self.make_tool_result(session_id, tool_result));
                 }
                 SdkContentBlock::Image(image) => {
                     // Convert SDK Image to ACP Image notification
                     // Reference: vendors/claude-code-acp/src/acp-agent.ts lines 1027-1035
-                    let session_id = _session_id;
                     notifications.push(self.make_image_message(session_id, image));
                 }
             }
@@ -383,8 +379,8 @@ impl NotificationConverter {
                 vec![]
             }
             // No content needed for these events
-            Some("content_block_stop") | Some("message_start") | Some("message_delta")
-            | Some("message_stop") => vec![],
+            Some("content_block_stop" | "message_start" | "message_delta" |
+"message_stop") => vec![],
             // Log unknown event types (like TS's unreachable)
             Some(unknown_type) => {
                 tracing::warn!(

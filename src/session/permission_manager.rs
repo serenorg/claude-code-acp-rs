@@ -199,7 +199,7 @@ impl PermissionManager {
         let tool_call_update = ToolCallUpdate::new(
             tool_call_id.to_string(),
             ToolCallUpdateFields::new()
-                .title(&format_tool_title(tool_name, tool_input))
+                .title(format_tool_title(tool_name, tool_input))
                 .raw_input(tool_input.clone()),
         );
 

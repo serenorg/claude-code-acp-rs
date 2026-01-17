@@ -1,12 +1,17 @@
 //! Permission handling for tool execution
 //!
-//! Phase 1: Simplified permission handling with auto-approve mode.
-//! Phase 2: Full permission prompts with settings rules and user interaction.
+//! This module provides permission checking using a strategy pattern,
+//! where each permission mode has its own strategy implementation.
 
 use serde::{Deserialize, Serialize};
+use std::fmt;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
+use crate::permissions::strategies::{
+    AcceptEditsModeStrategy, BypassPermissionsModeStrategy, DefaultModeStrategy,
+    DontAskModeStrategy, PermissionModeStrategy, PlanModeStrategy,
+};
 use crate::settings::{PermissionChecker, PermissionDecision};
 use claude_code_agent_sdk::PermissionMode as SdkPermissionMode;
 
@@ -96,22 +101,30 @@ pub enum ToolPermissionResult {
 
 /// Permission handler for tool execution
 ///
-/// Combines mode-based checking with settings rules.
-///
-/// The permission checker is shared with the pre_tool_use_hook to ensure
-/// that runtime rule changes (e.g., "Always Allow") are reflected in both places.
-#[derive(Debug)]
+/// Uses a strategy pattern where each permission mode has its own strategy.
 pub struct PermissionHandler {
     mode: PermissionMode,
+    /// Strategy for current permission mode
+    strategy: Arc<dyn PermissionModeStrategy>,
     /// Shared permission checker from settings (shared with hook)
     checker: Option<Arc<RwLock<PermissionChecker>>>,
+}
+
+impl fmt::Debug for PermissionHandler {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("PermissionHandler")
+            .field("mode", &self.mode)
+            .field("strategy", &"<strategy>")
+            .field("checker", &self.checker)
+            .finish()
+    }
 }
 
 impl Default for PermissionHandler {
     fn default() -> Self {
         Self {
-            // Use Default mode (standard behavior with permission prompts)
             mode: PermissionMode::Default,
+            strategy: Arc::new(DefaultModeStrategy),
             checker: None,
         }
     }
@@ -129,6 +142,7 @@ impl PermissionHandler {
     pub fn with_mode(mode: PermissionMode) -> Self {
         Self {
             mode,
+            strategy: Self::create_strategy(mode),
             checker: None,
         }
     }
@@ -139,6 +153,7 @@ impl PermissionHandler {
     pub fn with_checker(checker: Arc<RwLock<PermissionChecker>>) -> Self {
         Self {
             mode: PermissionMode::Default,
+            strategy: Arc::new(DefaultModeStrategy),
             checker: Some(checker),
         }
     }
@@ -149,7 +164,19 @@ impl PermissionHandler {
     pub fn with_checker_owned(checker: PermissionChecker) -> Self {
         Self {
             mode: PermissionMode::Default,
+            strategy: Arc::new(DefaultModeStrategy),
             checker: Some(Arc::new(RwLock::new(checker))),
+        }
+    }
+
+    /// Create strategy for a given mode
+    fn create_strategy(mode: PermissionMode) -> Arc<dyn PermissionModeStrategy> {
+        match mode {
+            PermissionMode::Default => Arc::new(DefaultModeStrategy),
+            PermissionMode::AcceptEdits => Arc::new(AcceptEditsModeStrategy),
+            PermissionMode::Plan => Arc::new(PlanModeStrategy),
+            PermissionMode::DontAsk => Arc::new(DontAskModeStrategy),
+            PermissionMode::BypassPermissions => Arc::new(BypassPermissionsModeStrategy),
         }
     }
 
@@ -161,6 +188,7 @@ impl PermissionHandler {
     /// Set permission mode
     pub fn set_mode(&mut self, mode: PermissionMode) {
         self.mode = mode;
+        self.strategy = Self::create_strategy(mode);
     }
 
     /// Set the permission checker
@@ -183,77 +211,34 @@ impl PermissionHandler {
     ///
     /// Returns true if the operation should proceed without user prompt.
     ///
-    /// Note: AcceptEdits mode auto-approves ALL tools (same as BypassPermissions)
-    /// to maintain compatibility with root user environments while providing
-    /// full automation capabilities.
-    pub fn should_auto_approve(&self, tool_name: &str, _input: &serde_json::Value) -> bool {
-        match self.mode {
-            PermissionMode::BypassPermissions => true,
-            PermissionMode::AcceptEdits => {
-                // Auto-approve ALL tools (same as BypassPermissions)
-                // This is needed because BypassPermissions cannot be used with root
-                true
-            }
-            PermissionMode::Plan => {
-                // Only allow read operations in plan mode
-                matches!(tool_name, "Read" | "Glob" | "Grep" | "LS" | "NotebookRead")
-            }
-            PermissionMode::DontAsk => {
-                // DontAsk mode: only pre-approved tools via settings rules
-                // No auto-approval
-                false
-            }
-            PermissionMode::Default => {
-                // Only auto-approve read operations
-                matches!(tool_name, "Read" | "Glob" | "Grep" | "LS" | "NotebookRead")
-            }
-        }
+    /// Delegates to the current strategy.
+    pub fn should_auto_approve(&self, tool_name: &str, input: &serde_json::Value) -> bool {
+        self.strategy.should_auto_approve(tool_name, input)
     }
 
     /// Check if a tool is blocked in current mode
+    ///
+    /// Returns true if the tool is blocked.
+    ///
+    /// Note: This method doesn't take tool_input, so it's less precise than
+    /// the strategy method. For plan mode, it conservatively blocks all writes
+    /// since it can't check if the file is in the plans directory.
     pub fn is_tool_blocked(&self, tool_name: &str) -> bool {
-        if self.mode == PermissionMode::Plan {
-            // Block write operations in plan mode
-            matches!(tool_name, "Edit" | "Write" | "Bash" | "NotebookEdit")
-        } else {
-            false
-        }
+        self.strategy
+            .is_tool_blocked(tool_name, &serde_json::Value::Null)
+            .is_some()
     }
 
     /// Check permission for a tool with full context
     ///
-    /// Combines mode-based checking with settings rules.
+    /// Combines strategy-based checking with settings rules.
     /// Returns the permission result.
-    ///
-    /// Note: Both BypassPermissions and AcceptEdits modes bypass all permission
-    /// checks (BypassPermissions for compatibility with non-root environments,
-    /// AcceptEdits for root user compatibility).
     pub async fn check_permission(
         &self,
         tool_name: &str,
         tool_input: &serde_json::Value,
     ) -> ToolPermissionResult {
-        // BypassPermissions and AcceptEdits modes allow everything
-        // (AcceptEdits behaves like BypassPermissions for root compatibility)
-        if matches!(
-            self.mode,
-            PermissionMode::BypassPermissions | PermissionMode::AcceptEdits
-        ) {
-            return ToolPermissionResult::Allowed;
-        }
-
-        // Check if tool is blocked in current mode
-        if self.is_tool_blocked(tool_name) {
-            return ToolPermissionResult::Blocked {
-                reason: format!(
-                    "Tool {} is blocked in {} mode",
-                    tool_name,
-                    self.mode.as_str()
-                ),
-            };
-        }
-
-        // Check settings rules if available
+        // Check settings rules first (if available)
         if let Some(ref checker) = self.checker {
             let checker_read = checker.read().await;
             let result = checker_read.check_permission(tool_name, tool_input);
@@ -270,13 +255,24 @@ impl PermissionHandler {
                     return ToolPermissionResult::Allowed;
                 }
                 PermissionDecision::Ask => {
-                    // Fall through to mode-based check
+                    // Fall through to strategy-based check
                 }
             }
         }
 
+        // Use strategy for mode-specific logic
+        let strategy_result = self.strategy.check_permission(tool_name, tool_input);
+
+        // Special handling for DontAsk mode: convert NeedsPermission to Blocked
+        if self.mode == PermissionMode::DontAsk {
+            if strategy_result == ToolPermissionResult::NeedsPermission {
+                return ToolPermissionResult::Blocked {
+                    reason: "Tool not pre-approved by settings rules in DontAsk mode".to_string(),
+                };
+            }
+        }
+
         // User interaction tools should always be allowed
-        // These tools themselves facilitate user interaction and shouldn't be blocked
         if matches!(
             tool_name,
             "AskUserQuestion" | "Task" | "TodoWrite" | "SlashCommand"
@@ -284,13 +280,7 @@ impl PermissionHandler {
             return ToolPermissionResult::Allowed;
         }
 
-        // Mode-based auto-approve
-        if self.should_auto_approve(tool_name, tool_input) {
-            return ToolPermissionResult::Allowed;
-        }
-
-        // Default: need to ask user
-        ToolPermissionResult::NeedsPermission
+        strategy_result
     }
 
     /// Add a runtime allow rule (e.g., from user's "Always Allow" choice)
@@ -340,6 +330,11 @@ mod tests {
     fn test_permission_mode_str() {
         assert_eq!(PermissionMode::Default.as_str(), "default");
         assert_eq!(PermissionMode::AcceptEdits.as_str(), "acceptEdits");
+        assert_eq!(PermissionMode::Plan.as_str(), "plan");
+        assert_eq!(
+            PermissionMode::BypassPermissions.as_str(),
+            "bypassPermissions"
+        );
     }
 
     #[test]
@@ -347,7 +342,7 @@ mod tests {
         let handler = PermissionHandler::new();
         let input = json!({});
 
-        // Default mode (PermissionMode::Default) auto-approves reads
+        // Default mode auto-approves reads
         assert!(handler.should_auto_approve("Read", &input));
         assert!(handler.should_auto_approve("Glob", &input));
         assert!(handler.should_auto_approve("Grep", &input));
@@ -400,5 +395,78 @@ mod tests {
         assert!(handler.is_tool_blocked("Bash"));
         assert!(!handler.is_tool_blocked("Read"));
         assert!(!handler.is_tool_blocked("LS"));
+    }
+
+    #[tokio::test]
+    async fn test_plan_mode_strategy_allows_plan_file_writes() {
+        let handler = PermissionHandler::with_mode(PermissionMode::Plan);
+        let home = dirs::home_dir().unwrap();
+        let plan_file = home.join(".claude").join("plans").join("test.md");
+
+        match handler
+            .check_permission(
+                "Write",
+                &json!({"file_path": plan_file.to_str().unwrap(), "content": "test"}),
+            )
+            .await
+        {
+            ToolPermissionResult::Allowed => {}
+            _ => panic!("Expected Allowed for plan file writes"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_plan_mode_strategy_blocks_non_plan_writes() {
+        let handler = PermissionHandler::with_mode(PermissionMode::Plan);
+
+        match handler
+            .check_permission("Write", &json!({"file_path": "/tmp/test.txt", "content": "test"}))
+            .await
+        {
+            ToolPermissionResult::Blocked { .. } => {}
+            _ => panic!("Expected Blocked for non-plan file writes"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_default_mode_strategy() {
+        let handler = PermissionHandler::new();
+
+        // Reads are auto-approved
+        match handler.check_permission("Read", &json!({})).await {
+            ToolPermissionResult::Allowed => {}
+            _ => panic!("Expected Allowed for Read"),
+        }
+
+        // Writes need permission
+        match handler.check_permission("Write", &json!({})).await {
+            ToolPermissionResult::NeedsPermission => {}
+            _ => panic!("Expected NeedsPermission for Write"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_bypass_permissions_strategy() {
+        let handler = PermissionHandler::with_mode(PermissionMode::BypassPermissions);
+
+        // Everything is allowed
+        match handler
+            .check_permission("Bash", &json!({"command": "rm -rf /"}))
+            .await
+        {
+            ToolPermissionResult::Allowed => {}
+            _ => panic!("Expected Allowed for Bash in BypassPermissions mode"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_accept_edits_strategy() {
+        let handler = PermissionHandler::with_mode(PermissionMode::AcceptEdits);
+
+        // Everything is allowed
+        match handler.check_permission("Write", &json!({})).await {
+            ToolPermissionResult::Allowed => {}
+            _ => panic!("Expected Allowed for Write in AcceptEdits mode"),
+        }
     }
 }

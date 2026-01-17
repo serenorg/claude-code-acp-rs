@@ -9,6 +9,7 @@ mod core;
 mod flush;
 mod handlers;
 mod runner;
+mod slash_commands;
 
 pub use core::ClaudeAcpAgent;
 pub use runner::{run_acp, run_acp_with_cli, shutdown_otel};

@@ -38,7 +38,7 @@ impl Tool for SlashCommandTool {
     }
 
     fn description(&self) -> &str {
-        "Execute a user-invocable slash command"
+        "Execute a slash command. Available commands are sent to the client via available_commands_update."
     }
 
     fn input_schema(&self) -> Value {

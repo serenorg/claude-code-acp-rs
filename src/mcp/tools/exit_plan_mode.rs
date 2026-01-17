@@ -31,14 +31,21 @@ impl Tool for ExitPlanModeTool {
         "Use this tool when you are in plan mode and have finished writing your plan to the plan file \
          and are ready for user approval. This tool signals that you're done planning and ready for \
          the user to review and approve. IMPORTANT: Only use this tool for tasks that require planning \
-         the implementation steps of code changes, not for research tasks."
+         the implementation steps of code changes, not for research tasks. \
+         INPUT: Pass your plan content as a 'plan' parameter (e.g., {\"plan\": \"Your plan summary here\"}) \
+         so it can be displayed in the approval dialog."
     }
 
     fn input_schema(&self) -> Value {
         json!({
             "type": "object",
-            "additionalProperties": true,
-            "properties": {},
+            "description": "Exit plan mode and request user approval for the plan",
+            "properties": {
+                "plan": {
+                    "type": "string",
+                    "description": "The plan content that was written to the plan file"
+                }
+            },
             "required": []
         })
     }

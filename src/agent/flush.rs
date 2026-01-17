@@ -60,7 +60,7 @@ pub async fn ensure_notifications_flushed(
         // The flush() method should be available on JrConnectionCx
         // from the patched sacp library
         match flush_with_native(connection_cx, notification_count).await {
-            Ok(_) => {
+            Ok(()) => {
                 tracing::debug!("Successfully flushed pending notifications");
             }
             Err(e) => {

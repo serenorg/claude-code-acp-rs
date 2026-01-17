@@ -34,7 +34,7 @@ impl WriteTool {
     /// Note: Permission checking is now handled at the SDK level.
     /// The SDK's `mcp_message` handler calls `can_use_tool` callback before executing MCP tools.
     /// This method is kept for potential future tool-specific permission logic.
-    async fn check_permission(
+    fn check_permission(
         &self,
         _input: &serde_json::Value,
         _context: &ToolContext,
@@ -81,7 +81,7 @@ impl Tool for WriteTool {
 
     async fn execute(&self, input: serde_json::Value, context: &ToolContext) -> ToolResult {
         // Check permission before executing
-        if let Some(result) = self.check_permission(&input, context).await {
+        if let Some(result) = self.check_permission(&input, context) {
             return result;
         }
 

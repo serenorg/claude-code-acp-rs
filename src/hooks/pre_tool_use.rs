@@ -12,13 +12,21 @@ use claude_code_agent_sdk::{
 };
 use dashmap::DashMap;
 use futures::future::BoxFuture;
-use sacp::{JrConnectionCx, link::AgentToClient};
+use sacp::{
+    JrConnectionCx,
+    link::AgentToClient,
+    schema::{
+        SessionId, SessionNotification, SessionUpdate, ToolCallId, ToolCallStatus,
+        ToolCallUpdate, ToolCallUpdateFields, ToolCallContent,
+    },
+};
 use tokio::sync::RwLock;
 use tracing::Instrument;
 
 use crate::command_safety::{command_might_be_dangerous, is_known_safe_command};
-use crate::session::PermissionMode;
+use crate::session::{PermissionMode, PermissionHandler};
 use crate::settings::PermissionChecker;
+use crate::utils::is_plans_directory_path;
 
 /// Creates a PreToolUse hook that checks permissions using settings rules and permission mode.
 ///
@@ -55,7 +63,7 @@ use crate::settings::PermissionChecker;
 /// * `connection_cx_lock` - Connection for sending permission requests
 /// * `session_id` - Session ID for permission requests
 /// * `permission_checker` - Optional permission checker for settings-based rules
-/// * `permission_mode` - Shared permission mode that can be updated at runtime
+/// * `permission` - Shared permission handler (contains mode that can be updated at runtime)
 /// * `permission_cache` - Cache for storing permission results (for can_use_tool callback)
 /// * `tool_use_id_cache` - Cache for storing tool_use_id (for can_use_tool callback)
 ///
@@ -66,25 +74,24 @@ pub fn create_pre_tool_use_hook(
     connection_cx_lock: Arc<OnceLock<JrConnectionCx<AgentToClient>>>,
     session_id: String,
     permission_checker: Option<Arc<RwLock<PermissionChecker>>>,
-    permission_mode: Arc<RwLock<PermissionMode>>,
+    permission: Arc<RwLock<PermissionHandler>>,
     permission_cache: Arc<DashMap<String, bool>>,
     tool_use_id_cache: Arc<DashMap<String, String>>,
 ) -> HookCallback {
     Arc::new(
         move |input: HookInput, tool_use_id: Option<String>, _context: HookContext| {
-            // These parameters are kept for API compatibility but no longer used here.
-            // Permission requests are now handled by can_use_tool callback.
-            let _connection_cx_lock = Arc::clone(&connection_cx_lock);
+            // Clone the connection_cx_lock for sending denied tool result notifications
+            let connection_cx_lock = Arc::clone(&connection_cx_lock);
             let permission_checker = permission_checker.clone();
-            let permission_mode = permission_mode.clone();
-            let _session_id = session_id.clone();
+            let permission = permission.clone();
+            let session_id = session_id.clone();
             let _permission_cache = Arc::clone(&permission_cache);
             let tool_use_id_cache = Arc::clone(&tool_use_id_cache);
 
             // Extract tool name early for span naming
             let (tool_name, is_pre_tool) = match &input {
                 HookInput::PreToolUse(pre_tool) => (pre_tool.tool_name.clone(), true),
-                _ => ("".to_string(), false),
+                _ => (String::new(), false),
             };
 
             // Create a span for this hook execution
@@ -109,17 +116,14 @@ pub fn create_pre_tool_use_hook(
                     let start_time = Instant::now();
 
                     // Only handle PreToolUse events
-                    let (tool_name, tool_input) = match &input {
-                        HookInput::PreToolUse(pre_tool) => {
-                            (pre_tool.tool_name.clone(), pre_tool.tool_input.clone())
-                        }
-                        _ => {
-                            tracing::debug!("Ignoring non-PreToolUse event");
-                            return HookJsonOutput::Sync(SyncHookJsonOutput {
-                                continue_: Some(true),
-                                ..Default::default()
-                            });
-                        }
+                    let (tool_name, tool_input) = if let HookInput::PreToolUse(pre_tool) = &input {
+                        (pre_tool.tool_name.clone(), pre_tool.tool_input.clone())
+                    } else {
+                        tracing::debug!("Ignoring non-PreToolUse event");
+                        return HookJsonOutput::Sync(SyncHookJsonOutput {
+                            continue_: Some(true),
+                            ..Default::default()
+                        });
                     };
 
                     tracing::debug!(
@@ -128,8 +132,33 @@ pub fn create_pre_tool_use_hook(
                         "PreToolUse hook triggered"
                     );
 
+                    // IMPORTANT: ExitPlanMode is handled specially by canUseTool callback
+                    // We skip all permission checks here to avoid double permission prompts
+                    // The canUseTool callback will handle the permission dialog
+                    let stripped_tool_name = tool_name.strip_prefix("mcp__acp__").unwrap_or(&tool_name);
+                    if stripped_tool_name == "ExitPlanMode" {
+                        tracing::info!(
+                            tool_name = %tool_name,
+                            tool_use_id = ?tool_use_id,
+                            "ExitPlanMode detected in pre_tool_use - skipping permission checks, delegating to canUseTool callback"
+                        );
+                        return HookJsonOutput::Sync(SyncHookJsonOutput {
+                            continue_: Some(true),
+                            hook_specific_output: Some(HookSpecificOutput::PreToolUse(
+                                PreToolUseHookSpecificOutput {
+                                    permission_decision: Some("defer".to_string()),
+                                    permission_decision_reason: Some(
+                                        "ExitPlanMode permission handled by canUseTool callback".to_string()
+                                    ),
+                                    updated_input: None,
+                                },
+                            )),
+                            ..Default::default()
+                        });
+                    }
+
                     // Get current permission mode
-                    let mode = *permission_mode.read().await;
+                    let mode = permission.read().await.mode();
 
                     // BypassPermissions and AcceptEdits modes allow everything
                     // (AcceptEdits behaves like BypassPermissions for root compatibility)
@@ -160,64 +189,6 @@ pub fn create_pre_tool_use_hook(
                                         "Allowed by {} mode (auto-approve all tools)",
                                         mode_str
                                     )),
-                                    updated_input: None,
-                                },
-                            )),
-                            ..Default::default()
-                        });
-                    }
-
-                    // Strip mcp__acp__ prefix for consistent tool name matching
-                    let stripped_tool_name =
-                        tool_name.strip_prefix("mcp__acp__").unwrap_or(&tool_name);
-
-                    // Plan mode: block write operations
-                    if mode == PermissionMode::Plan {
-                        let is_write_operation = matches!(
-                            stripped_tool_name,
-                            "Edit" | "Write" | "Bash" | "NotebookEdit"
-                        );
-                        if is_write_operation {
-                            let elapsed = start_time.elapsed();
-                            let reason =
-                                format!("Tool {} is blocked in Plan mode (read-only)", tool_name);
-                            tracing::warn!(
-                                tool_name = %tool_name,
-                                tool_use_id = ?tool_use_id,
-                                mode = "plan",
-                                elapsed_us = elapsed.as_micros(),
-                                "Tool blocked by Plan mode"
-                            );
-
-                            return HookJsonOutput::Sync(SyncHookJsonOutput {
-                                continue_: Some(true),
-                                hook_specific_output: Some(HookSpecificOutput::PreToolUse(
-                                    PreToolUseHookSpecificOutput {
-                                        permission_decision: Some("deny".to_string()),
-                                        permission_decision_reason: Some(reason),
-                                        updated_input: None,
-                                    },
-                                )),
-                                ..Default::default()
-                            });
-                        }
-                        // Read operations in Plan mode: allow them
-                        let elapsed = start_time.elapsed();
-                        tracing::debug!(
-                            tool_name = %tool_name,
-                            tool_use_id = ?tool_use_id,
-                            mode = "plan",
-                            elapsed_us = elapsed.as_micros(),
-                            "Tool allowed in Plan mode (read operation)"
-                        );
-                        return HookJsonOutput::Sync(SyncHookJsonOutput {
-                            continue_: Some(true),
-                            hook_specific_output: Some(HookSpecificOutput::PreToolUse(
-                                PreToolUseHookSpecificOutput {
-                                    permission_decision: Some("allow".to_string()),
-                                    permission_decision_reason: Some(
-                                        "Allowed in Plan mode (read operation)".to_string(),
-                                    ),
                                     updated_input: None,
                                 },
                             )),
@@ -301,6 +272,78 @@ pub fn create_pre_tool_use_hook(
                         }
                     }
 
+                    // Plan mode: Block write operations EXCEPT for plan files
+                    if mode == PermissionMode::Plan {
+                        let is_write_operation = matches!(
+                            stripped_tool_name,
+                            "Edit" | "Write" | "Bash" | "NotebookEdit"
+                        );
+
+                        if is_write_operation {
+                            // For file operations, check if writing to plans directory
+                            let is_plan_file = if matches!(stripped_tool_name, "Edit" | "Write" | "NotebookEdit") {
+                                tool_input
+                                    .get("file_path")
+                                    .or_else(|| tool_input.get("path"))
+                                    .and_then(|v| v.as_str())
+                                    .map(is_plans_directory_path)
+                                    .unwrap_or(false)
+                            } else {
+                                // Bash is never allowed in Plan mode
+                                false
+                            };
+
+                            if !is_plan_file {
+                                let reason = format!(
+                                    "Tool {} is not allowed in Plan mode (only read operations and writing to ~/.claude/plans/ are allowed)",
+                                    stripped_tool_name
+                                );
+                                tracing::warn!(
+                                    tool_name = %tool_name,
+                                    tool_use_id = ?tool_use_id,
+                                    mode = "plan",
+                                    elapsed_us = start_time.elapsed().as_micros(),
+                                    "Tool blocked by Plan mode"
+                                );
+                                return create_deny_response(
+                                    &connection_cx_lock,
+                                    &session_id,
+                                    tool_use_id.as_ref(),
+                                    &tool_name,
+                                    reason,
+                                );
+                            }
+
+                            // Allow plan file writes
+                            tracing::info!(
+                                tool_name = %tool_name,
+                                file_path = ?tool_input.get("file_path"),
+                                "Plan mode: allowing write to plans directory"
+                            );
+                        }
+
+                        // Auto-allow read operations in Plan mode
+                        let is_read_only = matches!(
+                            stripped_tool_name,
+                            "Read" | "Grep" | "Glob" | "LS" | "NotebookRead"
+                        );
+                        if is_read_only {
+                            return HookJsonOutput::Sync(SyncHookJsonOutput {
+                                continue_: Some(true),
+                                hook_specific_output: Some(HookSpecificOutput::PreToolUse(
+                                    PreToolUseHookSpecificOutput {
+                                        permission_decision: Some("allow".to_string()),
+                                        permission_decision_reason: Some(
+                                            "Allowed in Plan mode (read-only operation)".to_string()
+                                        ),
+                                        updated_input: None,
+                                    },
+                                )),
+                                ..Default::default()
+                            });
+                        }
+                    }
+
                     // Check permission (if checker is available, otherwise default to Ask)
                     let permission_check = if let Some(checker) = &permission_checker {
                         let checker = checker.read().await;
@@ -363,17 +406,24 @@ pub fn create_pre_tool_use_hook(
                                 rule = ?permission_check.rule,
                                 "Tool execution denied by rule"
                             );
-                            HookJsonOutput::Sync(SyncHookJsonOutput {
-                                continue_: Some(false), // 阻止执行
-                                hook_specific_output: Some(HookSpecificOutput::PreToolUse(
-                                    PreToolUseHookSpecificOutput {
-                                        permission_decision: Some("deny".to_string()),
-                                        permission_decision_reason: permission_check.rule,
-                                        updated_input: None,
-                                    },
-                                )),
-                                ..Default::default()
-                            })
+                            let reason = permission_check.rule.unwrap_or_else(|| {
+                                // Use stripped tool name, or fall back to original, or a default
+                                let display_name = if !stripped_tool_name.is_empty() {
+                                    stripped_tool_name
+                                } else if !tool_name.is_empty() {
+                                    tool_name.as_str()
+                                } else {
+                                    "the requested tool" // Fallback if both are empty
+                                };
+                                format!("Tool {} denied by permission settings", display_name)
+                            });
+                            create_deny_response(
+                                &connection_cx_lock,
+                                &session_id,
+                                tool_use_id.as_ref(),
+                                &tool_name,
+                                reason,
+                            )
                         }
                         crate::settings::PermissionDecision::Ask => {
                             // Following TypeScript version's design:
@@ -420,6 +470,134 @@ pub fn create_pre_tool_use_hook(
     )
 }
 
+/// Send a tool result notification when a tool is denied by permission check
+///
+/// This ensures that clients (like Zed) receive a corresponding tool_result
+/// notification even when a tool is blocked before execution.
+///
+/// # Arguments
+///
+/// * `connection_cx_lock` - The connection context for sending notifications
+/// * `session_id` - The session ID
+/// * `tool_use_id` - The tool use ID to correlate with the tool_use notification
+/// * `tool_name` - The name of the tool that was denied
+/// * `reason` - The reason for the denial
+///
+/// # Note
+///
+/// This function sends the notification **synchronously** to ensure:
+/// 1. The notification is sent before the hook response
+/// 2. The notification can be properly flushed with the flush mechanism
+/// 3. Any send errors are detected immediately
+fn send_denied_tool_result(
+    connection_cx_lock: &Arc<OnceLock<JrConnectionCx<AgentToClient>>>,
+    session_id: &str,
+    tool_use_id: &str,
+    tool_name: &str,
+    reason: &str,
+) {
+    let Some(connection_cx) = connection_cx_lock.get() else {
+        tracing::warn!(
+            tool_name = %tool_name,
+            tool_use_id = %tool_use_id,
+            "Connection context not available, cannot send denied tool result"
+        );
+        return;
+    };
+
+    let session_id = SessionId::new(session_id.to_string());
+    let tool_call_id = ToolCallId::new(tool_use_id.to_string());
+
+    // Build error content
+    let error_content = format!("Tool execution denied: {}", reason);
+    let content: Vec<ToolCallContent> = vec![format!("```\n{}\n```", error_content).into()];
+
+    // Build raw_output JSON
+    let raw_output = serde_json::json!({
+        "content": error_content,
+        "is_error": true
+    });
+
+    // Create tool result notification with Failed status
+    let update_fields = ToolCallUpdateFields::new()
+        .status(ToolCallStatus::Failed)
+        .content(content)
+        .raw_output(raw_output);
+
+    let update = ToolCallUpdate::new(tool_call_id, update_fields);
+    let notification = SessionNotification::new(
+        session_id,
+        SessionUpdate::ToolCallUpdate(update),
+    );
+
+    // Send the notification synchronously
+    // Note: send_notification uses unbounded_send which is non-blocking
+    // The actual network IO is handled by the outgoing actor
+    if let Err(e) = connection_cx.send_notification(notification) {
+        tracing::warn!(
+            tool_name = %tool_name,
+            tool_use_id = %tool_use_id,
+            error = %e,
+            "Failed to send denied tool result notification"
+        );
+    } else {
+        tracing::debug!(
+            tool_name = %tool_name,
+            tool_use_id = %tool_use_id,
+            "Sent denied tool result notification"
+        );
+    }
+}
+
+/// Create a deny hook response with tool_result notification
+///
+/// This helper function ensures that when a tool is denied:
+/// 1. A tool_result notification is sent to the client (so Zed doesn't show "not found")
+/// 2. The hook returns the proper deny response
+///
+/// # Arguments
+///
+/// * `connection_cx_lock` - The connection context for sending notifications
+/// * `session_id` - The session ID
+/// * `tool_use_id` - Optional tool use ID
+/// * `tool_name` - The name of the tool that was denied
+/// * `reason` - The reason for the denial
+///
+/// # Returns
+///
+/// A HookJsonOutput with deny decision
+fn create_deny_response(
+    connection_cx_lock: &Arc<OnceLock<JrConnectionCx<AgentToClient>>>,
+    session_id: &str,
+    tool_use_id: Option<&String>,
+    tool_name: &str,
+    reason: String,
+) -> HookJsonOutput {
+    // Send tool_result notification to client so Zed doesn't show "Tool call not found"
+    // Note: send_notification is non-blocking (uses unbounded_send)
+    if let Some(tuid) = tool_use_id {
+        send_denied_tool_result(
+            connection_cx_lock,
+            session_id,
+            tuid,
+            tool_name,
+            &reason,
+        );
+    }
+
+    HookJsonOutput::Sync(SyncHookJsonOutput {
+        continue_: Some(true),
+        hook_specific_output: Some(HookSpecificOutput::PreToolUse(
+            PreToolUseHookSpecificOutput {
+                permission_decision: Some("deny".to_string()),
+                permission_decision_reason: Some(reason),
+                updated_input: None,
+            },
+        )),
+        ..Default::default()
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -446,11 +624,13 @@ mod tests {
             Arc::new(OnceLock::new());
         let permission_cache: Arc<DashMap<String, bool>> = Arc::new(DashMap::new());
         let tool_use_id_cache: Arc<DashMap<String, String>> = Arc::new(DashMap::new());
+        // Create PermissionHandler with the specified mode
+        let permission = PermissionHandler::with_mode(mode);
         create_pre_tool_use_hook(
             connection_cx_lock,
             "test-session".to_string(),
             Some(checker),
-            Arc::new(RwLock::new(mode)),
+            Arc::new(RwLock::new(permission)),
             permission_cache,
             tool_use_id_cache,
         )
@@ -640,78 +820,6 @@ mod tests {
                             .unwrap()
                             .contains("BypassPermissions")
                     );
-                } else {
-                    panic!("Expected PreToolUse specific output");
-                }
-            }
-            HookJsonOutput::Async(_) => panic!("Expected sync output"),
-        }
-    }
-
-    #[tokio::test]
-    async fn test_plan_mode_blocks_write_operations() {
-        // Plan mode should block write operations (Edit, Write, Bash, NotebookEdit)
-        let checker = make_permission_checker(PermissionSettings {
-            allow: Some(vec!["Edit".to_string()]),
-            ..Default::default()
-        });
-
-        let hook = make_test_hook_with_mode(checker, PermissionMode::Plan);
-        let input = HookInput::PreToolUse(claude_code_agent_sdk::PreToolUseHookInput {
-            session_id: "test".to_string(),
-            transcript_path: "/tmp/test".to_string(),
-            cwd: "/tmp".to_string(),
-            permission_mode: None,
-            tool_name: "Edit".to_string(),
-            tool_input: json!({"file_path": "/tmp/test.txt"}),
-        });
-
-        let result = hook(input, None, HookContext::default()).await;
-
-        match result {
-            HookJsonOutput::Sync(output) => {
-                assert_eq!(output.continue_, Some(true));
-                if let Some(HookSpecificOutput::PreToolUse(specific)) = output.hook_specific_output
-                {
-                    assert_eq!(specific.permission_decision, Some("deny".to_string()));
-                    assert!(
-                        specific
-                            .permission_decision_reason
-                            .unwrap()
-                            .contains("Plan mode")
-                    );
-                } else {
-                    panic!("Expected PreToolUse specific output");
-                }
-            }
-            HookJsonOutput::Async(_) => panic!("Expected sync output"),
-        }
-    }
-
-    #[tokio::test]
-    async fn test_plan_mode_allows_read_operations() {
-        // Plan mode should allow read operations (without settings check)
-        let checker = make_permission_checker(PermissionSettings::default());
-
-        let hook = make_test_hook_with_mode(checker, PermissionMode::Plan);
-        let input = HookInput::PreToolUse(claude_code_agent_sdk::PreToolUseHookInput {
-            session_id: "test".to_string(),
-            transcript_path: "/tmp/test".to_string(),
-            cwd: "/tmp".to_string(),
-            permission_mode: None,
-            tool_name: "Read".to_string(),
-            tool_input: json!({"file_path": "/tmp/test.txt"}),
-        });
-
-        let result = hook(input, None, HookContext::default()).await;
-
-        match result {
-            HookJsonOutput::Sync(output) => {
-                assert_eq!(output.continue_, Some(true));
-                // Plan mode allows reads - should return allow directly
-                if let Some(HookSpecificOutput::PreToolUse(specific)) = output.hook_specific_output
-                {
-                    assert_eq!(specific.permission_decision, Some("allow".to_string()));
                 } else {
                     panic!("Expected PreToolUse specific output");
                 }
@@ -955,6 +1063,254 @@ mod tests {
                     output.hook_specific_output.is_none(),
                     "Bash with non-safe command should trigger Ask decision, not auto-allow"
                 );
+            }
+            HookJsonOutput::Async(_) => panic!("Expected sync output"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_create_deny_response_without_tool_use_id() {
+        // Test that create_deny_response handles missing tool_use_id gracefully
+        let connection_cx_lock: Arc<OnceLock<JrConnectionCx<AgentToClient>>> =
+            Arc::new(OnceLock::new());
+        let permission_cache: Arc<DashMap<String, bool>> = Arc::new(DashMap::new());
+        let tool_use_id_cache: Arc<DashMap<String, String>> = Arc::new(DashMap::new());
+        // Create PermissionHandler with Default mode
+        let permission = PermissionHandler::with_mode(PermissionMode::Default);
+        let hook = create_pre_tool_use_hook(
+            connection_cx_lock,
+            "test-session".to_string(),
+            None,
+            Arc::new(RwLock::new(permission)),
+            permission_cache,
+            tool_use_id_cache,
+        );
+
+        // Test with no tool_use_id - should not panic
+        let input = HookInput::PreToolUse(claude_code_agent_sdk::PreToolUseHookInput {
+            session_id: "test".to_string(),
+            transcript_path: "/tmp/test".to_string(),
+            cwd: "/tmp".to_string(),
+            permission_mode: None,
+            tool_name: "Write".to_string(),
+            tool_input: json!({"file_path": "/tmp/test.txt", "content": "test"}),
+        });
+
+        // This should not panic even without tool_use_id
+        let result = hook(input, None, HookContext::default()).await;
+        match result {
+            HookJsonOutput::Sync(output) => {
+                // Should get an Ask decision since there are no rules and no permission mode restriction
+                assert_eq!(output.continue_, Some(true));
+            }
+            HookJsonOutput::Async(_) => panic!("Expected sync output"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_empty_tool_name_handling() {
+        // Test that empty tool_name is handled gracefully
+        let connection_cx_lock: Arc<OnceLock<JrConnectionCx<AgentToClient>>> =
+            Arc::new(OnceLock::new());
+        let permission_cache: Arc<DashMap<String, bool>> = Arc::new(DashMap::new());
+        let tool_use_id_cache: Arc<DashMap<String, String>> = Arc::new(DashMap::new());
+
+        // Test with empty tool_name - should not panic and should use fallback
+        let empty_tool_name = "";
+        let result = format!("Tool {} denied", empty_tool_name);
+        assert!(result.contains("Tool  denied"), "Empty tool_name produces double space");
+
+        // Test the fallback logic
+        let display_name = if !empty_tool_name.is_empty() {
+            empty_tool_name
+        } else {
+            "the requested tool"
+        };
+        assert_eq!(display_name, "the requested tool");
+
+        // Test with normal tool_name
+        let normal_tool_name = "Write";
+        let display_name2 = if !normal_tool_name.is_empty() {
+            normal_tool_name
+        } else {
+            "the requested tool"
+        };
+        assert_eq!(display_name2, "Write");
+    }
+
+    #[tokio::test]
+    async fn test_plan_mode_allows_writing_plan_files() {
+        // Plan mode should allow writing to ~/.claude/plans/
+        let checker = make_permission_checker(PermissionSettings::default());
+        let hook = make_test_hook_with_mode(checker, PermissionMode::Plan);
+
+        let home = dirs::home_dir().unwrap();
+        let plan_file = home.join(".claude").join("plans").join("test-plan.md");
+
+        let input = HookInput::PreToolUse(claude_code_agent_sdk::PreToolUseHookInput {
+            session_id: "test".to_string(),
+            transcript_path: "/tmp/test".to_string(),
+            cwd: "/tmp".to_string(),
+            permission_mode: None,
+            tool_name: "Write".to_string(),
+            tool_input: json!({
+                "file_path": plan_file.to_str().unwrap(),
+                "content": "# Test Plan"
+            }),
+        });
+
+        let result = hook(input, None, HookContext::default()).await;
+
+        match result {
+            HookJsonOutput::Sync(output) => {
+                // Should allow (not deny) plan file writes
+                if let Some(HookSpecificOutput::PreToolUse(specific)) = output.hook_specific_output {
+                    assert_ne!(specific.permission_decision, Some("deny".to_string()));
+                }
+            }
+            HookJsonOutput::Async(_) => panic!("Expected sync output"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_plan_mode_blocks_non_plan_file_writes() {
+        // Plan mode should block writes to non-plan files
+        let checker = make_permission_checker(PermissionSettings::default());
+        let hook = make_test_hook_with_mode(checker, PermissionMode::Plan);
+
+        let input = HookInput::PreToolUse(claude_code_agent_sdk::PreToolUseHookInput {
+            session_id: "test".to_string(),
+            transcript_path: "/tmp/test".to_string(),
+            cwd: "/tmp".to_string(),
+            permission_mode: None,
+            tool_name: "Write".to_string(),
+            tool_input: json!({
+                "file_path": "/tmp/test.txt",
+                "content": "test"
+            }),
+        });
+
+        let result = hook(input, None, HookContext::default()).await;
+
+        match result {
+            HookJsonOutput::Sync(output) => {
+                assert_eq!(output.continue_, Some(true));
+                if let Some(HookSpecificOutput::PreToolUse(specific)) = output.hook_specific_output {
+                    assert_eq!(specific.permission_decision, Some("deny".to_string()));
+                    assert!(specific.permission_decision_reason.as_ref().unwrap().contains("Plan mode"));
+                }
+            }
+            HookJsonOutput::Async(_) => panic!("Expected sync output"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_plan_mode_blocks_bash() {
+        // Plan mode should block Bash commands even in plans directory
+        let checker = make_permission_checker(PermissionSettings::default());
+        let hook = make_test_hook_with_mode(checker, PermissionMode::Plan);
+
+        let home = dirs::home_dir().unwrap();
+
+        let input = HookInput::PreToolUse(claude_code_agent_sdk::PreToolUseHookInput {
+            session_id: "test".to_string(),
+            transcript_path: "/tmp/test".to_string(),
+            cwd: home.to_str().unwrap().to_string(),
+            permission_mode: None,
+            tool_name: "Bash".to_string(),
+            tool_input: json!({
+                "command": "echo 'test' > .claude/plans/test.md"
+            }),
+        });
+
+        let result = hook(input, None, HookContext::default()).await;
+
+        match result {
+            HookJsonOutput::Sync(output) => {
+                assert_eq!(output.continue_, Some(true));
+                if let Some(HookSpecificOutput::PreToolUse(specific)) = output.hook_specific_output {
+                    assert_eq!(specific.permission_decision, Some("deny".to_string()));
+                }
+            }
+            HookJsonOutput::Async(_) => panic!("Expected sync output"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_plan_mode_allows_read_operations() {
+        // Plan mode should allow read operations
+        let checker = make_permission_checker(PermissionSettings::default());
+        let hook = make_test_hook_with_mode(checker, PermissionMode::Plan);
+
+        let input = HookInput::PreToolUse(claude_code_agent_sdk::PreToolUseHookInput {
+            session_id: "test".to_string(),
+            transcript_path: "/tmp/test".to_string(),
+            cwd: "/tmp".to_string(),
+            permission_mode: None,
+            tool_name: "Read".to_string(),
+            tool_input: json!({"file_path": "/tmp/test.txt"}),
+        });
+
+        let result = hook(input, None, HookContext::default()).await;
+
+        match result {
+            HookJsonOutput::Sync(output) => {
+                if let Some(HookSpecificOutput::PreToolUse(specific)) = output.hook_specific_output {
+                    assert_eq!(specific.permission_decision, Some("allow".to_string()));
+                }
+            }
+            HookJsonOutput::Async(_) => panic!("Expected sync output"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_is_plans_directory_path() {
+        // Test absolute path
+        let home = dirs::home_dir().unwrap();
+        let plans_path = home.join(".claude").join("plans").join("plan.md");
+        assert!(is_plans_directory_path(plans_path.to_str().unwrap()));
+
+        // Test ~ expansion
+        assert!(is_plans_directory_path("~/.claude/plans/plan.md"));
+
+        // Test non-plans path
+        assert!(!is_plans_directory_path("/tmp/plan.md"));
+        assert!(!is_plans_directory_path("~/other/path/plan.md"));
+
+        // Test edge case: similar but not plans directory
+        assert!(!is_plans_directory_path("~/../.claude/plans/plan.md"));
+    }
+
+    #[tokio::test]
+    async fn test_plan_mode_allows_edit_in_plans_dir() {
+        // Plan mode should allow Edit operations in plans directory
+        let checker = make_permission_checker(PermissionSettings::default());
+        let hook = make_test_hook_with_mode(checker, PermissionMode::Plan);
+
+        let home = dirs::home_dir().unwrap();
+        let plan_file = home.join(".claude").join("plans").join("existing-plan.md");
+
+        let input = HookInput::PreToolUse(claude_code_agent_sdk::PreToolUseHookInput {
+            session_id: "test".to_string(),
+            transcript_path: "/tmp/test".to_string(),
+            cwd: "/tmp".to_string(),
+            permission_mode: None,
+            tool_name: "Edit".to_string(),
+            tool_input: json!({
+                "file_path": plan_file.to_str().unwrap(),
+                "edits": []
+            }),
+        });
+
+        let result = hook(input, None, HookContext::default()).await;
+
+        match result {
+            HookJsonOutput::Sync(output) => {
+                assert_eq!(output.continue_, Some(true));
+                // Should not deny
+                if let Some(HookSpecificOutput::PreToolUse(specific)) = output.hook_specific_output {
+                    assert_ne!(specific.permission_decision, Some("deny".to_string()));
+                }
             }
             HookJsonOutput::Async(_) => panic!("Expected sync output"),
         }

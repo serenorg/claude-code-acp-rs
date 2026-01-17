@@ -363,6 +363,7 @@ impl ExternalMcpServer {
                     timeout_secs = DEFAULT_INIT_TIMEOUT.as_secs(),
                     "MCP server initialization timed out"
                 );
+                #[allow(clippy::cast_possible_truncation)]
                 Err(ExternalMcpError::Timeout {
                     operation: "initialize".to_string(),
                     timeout_ms: DEFAULT_INIT_TIMEOUT.as_millis() as u64,
@@ -399,21 +400,19 @@ impl ExternalMcpServer {
             tokio::time::timeout(DEFAULT_REQUEST_TIMEOUT, self.send_request_internal(request))
                 .await;
 
-        match result {
-            Ok(inner_result) => inner_result,
-            Err(_) => {
-                tracing::error!(
-                    server_name = %self.name,
-                    method = %method,
-                    request_id = request_id,
-                    timeout_ms = DEFAULT_REQUEST_TIMEOUT.as_millis(),
-                    "MCP request timed out"
-                );
-                Err(ExternalMcpError::Timeout {
-                    operation: method,
-                    timeout_ms: DEFAULT_REQUEST_TIMEOUT.as_millis() as u64,
-                })
-            }
+        if let Ok(inner_result) = result { inner_result } else {
+            tracing::error!(
+                server_name = %self.name,
+                method = %method,
+                request_id = request_id,
+                timeout_ms = DEFAULT_REQUEST_TIMEOUT.as_millis(),
+                "MCP request timed out"
+            );
+            #[allow(clippy::cast_possible_truncation)]
+            Err(ExternalMcpError::Timeout {
+                operation: method,
+                timeout_ms: DEFAULT_REQUEST_TIMEOUT.as_millis() as u64,
+            })
         }
     }
 
@@ -488,6 +487,7 @@ impl ExternalMcpServer {
 
         // Update statistics
         self.total_requests.fetch_add(1, Ordering::Relaxed);
+        #[allow(clippy::cast_possible_truncation)]
         self.total_request_time_ms
             .fetch_add(total_elapsed.as_millis() as u64, Ordering::Relaxed);
 
@@ -828,19 +828,16 @@ impl ExternalMcpManager {
     pub fn all_tools(&self) -> Vec<ToolSchema> {
         let mut tools = Vec::new();
 
-        for entry in self.servers.iter() {
+        for entry in &self.servers {
             let server_name = entry.key();
             let server = entry.value();
             // Try to lock the mutex (non-blocking)
-            let server_guard = match server.try_lock() {
-                Ok(guard) => guard,
-                Err(_) => {
-                    tracing::warn!(
-                        server_name = %server_name,
-                        "MCP server is busy, skipping for tool listing"
-                    );
-                    continue; // Skip this server if lock is not available
-                }
+            let Ok(server_guard) = server.try_lock() else {
+                tracing::warn!(
+                    server_name = %server_name,
+                    "MCP server is busy, skipping for tool listing"
+                );
+                continue; // Skip this server if lock is not available
             };
 
             for tool in server_guard.tools() {
@@ -939,15 +936,12 @@ impl ExternalMcpManager {
             .filter_map(|entry| {
                 let server = entry.value();
                 // Try to lock the mutex (non-blocking)
-                match server.try_lock() {
-                    Ok(guard) => Some(guard.stats()),
-                    Err(_) => {
-                        tracing::warn!(
-                            server_name = %entry.key(),
-                            "MCP server is busy, skipping for stats"
-                        );
-                        None
-                    }
+                if let Ok(guard) = server.try_lock() { Some(guard.stats()) } else {
+                    tracing::warn!(
+                        server_name = %entry.key(),
+                        "MCP server is busy, skipping for stats"
+                    );
+                    None
                 }
             })
             .collect()
@@ -1034,6 +1028,7 @@ pub struct McpServerStats {
 
 impl McpServerStats {
     /// Get average request time in milliseconds
+    #[allow(clippy::cast_precision_loss)]
     pub fn avg_request_time_ms(&self) -> f64 {
         if self.total_requests == 0 {
             0.0

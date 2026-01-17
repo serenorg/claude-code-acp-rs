@@ -242,7 +242,7 @@ pub fn extract_tool_info(name: &str, input: &serde_json::Value, cwd: Option<&Pat
 
         "TodoWrite" => ToolInfo::new("Update task list", ToolKind::Think),
 
-        "EnterPlanMode" | "ExitPlanMode" => ToolInfo::new(name.to_string(), ToolKind::SwitchMode),
+        "EnterPlanMode" | "ExitPlanMode" => ToolInfo::new(effective_name.to_string(), ToolKind::SwitchMode),
 
         "AskUserQuestion" => ToolInfo::new("Ask question", ToolKind::Other),
 
@@ -271,8 +271,8 @@ pub fn extract_tool_info(name: &str, input: &serde_json::Value, cwd: Option<&Pat
                 .get("notebook_path")
                 .and_then(|v| v.as_str())
                 .unwrap_or("notebook");
-            let title = format!("{} {}", name, truncate_path(path, cwd_path));
-            let kind = if name == "NotebookRead" {
+            let title = format!("{} {}", effective_name, truncate_path(path, cwd_path));
+            let kind = if effective_name == "NotebookRead" {
                 ToolKind::Read
             } else {
                 ToolKind::Edit

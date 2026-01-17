@@ -14,7 +14,7 @@ use crate::mcp::tools::bash::contains_shell_operator;
 /// Cached regex for parsing permission rules
 /// Pattern: ToolName or ToolName(argument)
 /// Compiled once and reused for better performance
-static RULE_REGEX: once_cell::sync::Lazy<Regex> = once_cell::sync::Lazy::new(|| {
+static RULE_REGEX: std::sync::LazyLock<Regex> = std::sync::LazyLock::new(|| {
     // This regex is statically known and will always compile correctly
     Regex::new(r"^(\w+)(?:\((.+)\))?$").expect("Invalid hardcoded regex pattern")
 });

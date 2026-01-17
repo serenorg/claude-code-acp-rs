@@ -21,7 +21,9 @@ use claude_code_agent_sdk::{
 };
 use sacp::JrConnectionCx;
 use sacp::link::AgentToClient;
-use sacp::schema::McpServer;
+use sacp::schema::{
+    CurrentModeUpdate, McpServer, SessionId, SessionModeId, SessionNotification, SessionUpdate,
+};
 use tokio::sync::RwLock;
 use tracing::instrument;
 
@@ -68,8 +70,6 @@ pub struct Session {
     pub cwd: PathBuf,
     /// The Claude client for this session
     client: RwLock<ClaudeClient>,
-    /// Whether this session has been cancelled
-    cancelled: Arc<AtomicBool>,
     /// Permission handler for tool execution (wrapped in Arc for can_use_tool callback)
     permission: Arc<RwLock<PermissionHandler>>,
     /// Token usage tracker
@@ -82,8 +82,6 @@ pub struct Session {
     hook_callback_registry: Arc<HookCallbackRegistry>,
     /// Permission checker for hooks
     permission_checker: Arc<RwLock<PermissionChecker>>,
-    /// Shared permission mode (synced with permission handler and hooks)
-    permission_mode: Arc<RwLock<PermissionMode>>,
     /// Current model ID for this session (set once during initialization)
     current_model: OnceLock<String>,
     /// ACP MCP server for tool execution with notifications
@@ -181,19 +179,16 @@ impl Session {
             .unwrap_or_else(|e| {
                 tracing::warn!("Failed to load settings manager from cwd: {}. Using default settings.", e);
                 // Fallback: try to load settings from home directory
-                match dirs::home_dir() {
-                    Some(home) => {
-                        tracing::info!("Attempting to load settings from home directory");
-                        SettingsManager::new(&home).unwrap_or_else(|e2| {
-                            tracing::error!("Failed to load settings from home directory: {}. Using minimal default settings.", e2);
-                            // Last resort: create a manager with minimal settings
-                            SettingsManager::new_with_settings(crate::settings::Settings::default(), "/")
-                        })
-                    }
-                    None => {
-                        tracing::error!("No home directory found. Using minimal default settings.");
+                if let Some(home) = dirs::home_dir() {
+                    tracing::info!("Attempting to load settings from home directory");
+                    SettingsManager::new(&home).unwrap_or_else(|e2| {
+                        tracing::error!("Failed to load settings from home directory: {}. Using minimal default settings.", e2);
+                        // Last resort: create a manager with minimal settings
                         SettingsManager::new_with_settings(crate::settings::Settings::default(), "/")
-                    }
+                    })
+                } else {
+                    tracing::error!("No home directory found. Using minimal default settings.");
+                    SettingsManager::new_with_settings(crate::settings::Settings::default(), "/")
                 }
             });
         // Create shared permission checker that will be used by both hook and permission handler
@@ -203,10 +198,12 @@ impl Session {
             &cwd,
         )));
 
-        // Create shared permission mode that can be updated at runtime
-        // This is shared between the hook and the permission handler
-        // Default to Default mode (standard behavior with permission prompts)
-        let permission_mode = Arc::new(RwLock::new(PermissionMode::Default));
+        // Create PermissionHandler with shared PermissionChecker
+        // This ensures both pre_tool_use_hook and can_use_tool callback use the same rules
+        // PermissionHandler uses AcceptEdits mode (compatible with root, allows all tools)
+        let permission_handler = Arc::new(RwLock::new(PermissionHandler::with_checker(
+            permission_checker.clone(),
+        )));
 
         // Create shared connection_cx_lock for hook permission requests
         let connection_cx_lock: Arc<OnceLock<JrConnectionCx<AgentToClient>>> =
@@ -221,12 +218,12 @@ impl Session {
         // can_use_tool callback uses this when CLI doesn't provide tool_use_id
         let tool_use_id_cache: Arc<DashMap<String, String>> = Arc::new(DashMap::new());
 
-        // Create hooks with shared permission checker and mode
+        // Create hooks with shared permission checker and handler
         let pre_tool_use_hook = create_pre_tool_use_hook(
             connection_cx_lock.clone(),
             session_id.clone(),
             Some(permission_checker.clone()),
-            permission_mode.clone(),
+            permission_handler.clone(),
             permission_cache.clone(),
             tool_use_id_cache.clone(),
         );
@@ -256,13 +253,6 @@ impl Session {
             hooks_count = 2,
             "Hooks configured: PreToolUse, PostToolUse"
         );
-
-        // Create PermissionHandler with shared PermissionChecker
-        // This ensures both pre_tool_use_hook and can_use_tool callback use the same rules
-        // PermissionHandler uses AcceptEdits mode (compatible with root, allows all tools)
-        let permission_handler = Arc::new(RwLock::new(PermissionHandler::with_checker(
-            permission_checker.clone(),
-        )));
 
         // Create OnceLock for storing Arc<Session> (needed for callback)
         let session_lock: Arc<OnceLock<Arc<Session>>> = Arc::new(OnceLock::new());
@@ -431,14 +421,12 @@ impl Session {
             session_id,
             cwd,
             client: RwLock::new(client),
-            cancelled: Arc::new(AtomicBool::new(false)),
             permission: permission_handler,
             usage_tracker: UsageTracker::new(),
             converter: NotificationConverter::with_cwd(cwd_for_converter),
             connected: AtomicBool::new(false),
             hook_callback_registry,
             permission_checker,
-            permission_mode,
             current_model: OnceLock::new(),
             acp_mcp_server,
             background_processes,
@@ -610,20 +598,17 @@ impl Session {
         }
 
         // Get servers (no lock needed with OnceLock)
-        let servers = match self.external_mcp_servers.get() {
-            Some(s) => s,
-            None => {
-                tracing::debug!(
-                    session_id = %self.session_id,
-                    "No external MCP servers to connect"
-                );
-                self.external_mcp_connected.store(true, Ordering::SeqCst);
-                return Ok(());
-            }
+        let Some(servers) = self.external_mcp_servers.get() else {
+            tracing::debug!(
+                session_id = %self.session_id,
+                "No external MCP servers to connect"
+            );
+            self.external_mcp_connected.store(true, Ordering::SeqCst);
+            return Ok(());
         };
 
         // Clone server list to avoid holding reference
-        let servers_vec: Vec<_> = servers.iter().cloned().collect();
+        let servers_vec: Vec<_> = servers.clone();
 
         let server_count = servers_vec.len();
         let start_time = Instant::now();
@@ -639,7 +624,7 @@ impl Session {
         let mut success_count = 0;
         let mut error_count = 0;
 
-        for server in servers_vec.iter() {
+        for server in &servers_vec {
             match server {
                 McpServer::Stdio(s) => {
                     let server_start = Instant::now();
@@ -674,7 +659,7 @@ impl Session {
                         )
                         .await
                     {
-                        Ok(_) => {
+                        Ok(()) => {
                             success_count += 1;
                             let elapsed = server_start.elapsed();
                             tracing::info!(
@@ -856,12 +841,11 @@ impl Session {
         self.cancel_sender.subscribe()
     }
 
-    /// Check if the session has been cancelled
-    pub fn is_cancelled(&self) -> bool {
-        self.cancelled.load(Ordering::SeqCst)
-    }
-
     /// Cancel this session and interrupt the Claude CLI
+    ///
+    /// This sends an interrupt signal to the Claude CLI to stop the current operation.
+    /// Note: This does NOT use a cancelled flag anymore - cancellation is handled
+    /// per-prompt via CancellationToken in the PromptManager.
     #[instrument(
         name = "session_cancel",
         skip(self),
@@ -870,10 +854,8 @@ impl Session {
     pub async fn cancel(&self) {
         tracing::info!(
             session_id = %self.session_id,
-            "Cancelling session and sending interrupt signal"
+            "Sending interrupt signal to Claude CLI"
         );
-
-        self.cancelled.store(true, Ordering::SeqCst);
 
         // Send interrupt signal to Claude CLI to stop current operation
         if let Ok(client) = self.client.try_read() {
@@ -897,11 +879,6 @@ impl Session {
         }
     }
 
-    /// Reset the cancelled flag
-    pub fn reset_cancelled(&self) {
-        self.cancelled.store(false, Ordering::SeqCst);
-    }
-
     /// Get the permission handler
     pub async fn permission(&self) -> tokio::sync::RwLockReadGuard<'_, PermissionHandler> {
         self.permission.read().await
@@ -914,19 +891,54 @@ impl Session {
 
     /// Set the permission mode
     ///
-    /// Updates both the PermissionHandler and the shared permission mode
-    /// used by the pre_tool_use_hook.
+    /// Updates the PermissionHandler. The hook will read the mode
+    /// from the same PermissionHandler, ensuring consistency.
     pub async fn set_permission_mode(&self, mode: PermissionMode) {
-        // Update the permission handler
+        // Update the permission handler (single source of truth)
         self.permission.write().await.set_mode(mode);
-        // Also update the shared permission mode used by the hook
-        *self.permission_mode.write().await = mode;
 
         tracing::info!(
             session_id = %self.session_id,
             mode = mode.as_str(),
             "Permission mode updated"
         );
+    }
+
+    /// Send session/update notification for permission mode change
+    ///
+    /// This sends a CurrentModeUpdate notification to the client to inform it
+    /// that the permission mode has changed. This is used for ExitPlanMode to
+    /// notify the UI that the mode has been switched.
+    pub fn send_mode_update(&self, mode: &str) {
+        let Some(connection_cx) = self.get_connection_cx() else {
+            tracing::warn!(
+                session_id = %self.session_id,
+                mode = %mode,
+                "Connection not ready for mode update notification"
+            );
+            return;
+        };
+
+        let mode_update = CurrentModeUpdate::new(SessionModeId::new(mode));
+        let notification = SessionNotification::new(
+            SessionId::new(self.session_id.clone()),
+            SessionUpdate::CurrentModeUpdate(mode_update),
+        );
+
+        if let Err(e) = connection_cx.send_notification(notification) {
+            tracing::warn!(
+                session_id = %self.session_id,
+                mode = %mode,
+                error = %e,
+                "Failed to send CurrentModeUpdate notification"
+            );
+        } else {
+            tracing::info!(
+                session_id = %self.session_id,
+                mode = %mode,
+                "Sent CurrentModeUpdate notification"
+            );
+        }
     }
 
     /// Add an allow rule for a tool
@@ -1017,7 +1029,6 @@ impl Session {
         }
 
         // Set up cancel callback to interrupt Claude CLI when MCP cancellation is received
-        let cancelled_flag = self.cancelled.clone();
         let session_id = self.session_id.clone();
         let cancel_sender = self.cancel_sender.clone();
 
@@ -1027,8 +1038,8 @@ impl Session {
                     session_id = %session_id,
                     "MCP cancel callback invoked, sending cancel signal"
                 );
-                cancelled_flag.store(true, Ordering::SeqCst);
                 // Send cancel signal through the channel
+                // Note: Cancellation is now handled per-prompt via CancellationToken
                 let _ = cancel_sender.send(());
             })
             .await;
@@ -1041,7 +1052,6 @@ impl std::fmt::Debug for Session {
         f.debug_struct("Session")
             .field("session_id", &self.session_id)
             .field("cwd", &self.cwd)
-            .field("cancelled", &self.cancelled.load(Ordering::Relaxed))
             .field("connected", &self.connected.load(Ordering::Relaxed))
             .finish()
     }
@@ -1073,7 +1083,6 @@ mod tests {
 
         assert_eq!(session.session_id, "test-session-1");
         assert_eq!(session.cwd, PathBuf::from("/tmp"));
-        assert!(!session.is_cancelled());
         assert!(!session.is_connected());
     }
 
@@ -1087,11 +1096,9 @@ mod tests {
         )
         .unwrap();
 
-        assert!(!session.is_cancelled());
+        // Note: Cancellation is now handled per-prompt via CancellationToken
+        // This test just verifies that cancel() doesn't panic
         session.cancel().await;
-        assert!(session.is_cancelled());
-        session.reset_cancelled();
-        assert!(!session.is_cancelled());
     }
 
     #[tokio::test]

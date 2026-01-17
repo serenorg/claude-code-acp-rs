@@ -79,6 +79,7 @@ pub mod settings;
 pub mod terminal;
 pub mod tracing;
 pub mod types;
+pub mod utils;
 
 pub use agent::{run_acp, run_acp_with_cli, shutdown_otel};
 pub use cli::Cli;

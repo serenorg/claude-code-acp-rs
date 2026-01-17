@@ -44,7 +44,7 @@ impl WrappedChild {
 
     /// Wait for the process to exit
     pub async fn wait(&mut self) -> io::Result<std::process::ExitStatus> {
-        Pin::from(self.inner.wait()).await
+        self.inner.wait().await
     }
 
     /// Try to wait without blocking

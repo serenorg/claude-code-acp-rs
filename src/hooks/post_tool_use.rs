@@ -33,7 +33,7 @@ pub fn create_post_tool_use_hook(callback_registry: Arc<HookCallbackRegistry>) -
             // Extract tool name early for span naming
             let (tool_name, is_post_tool) = match &input {
                 HookInput::PostToolUse(post_tool) => (post_tool.tool_name.clone(), true),
-                _ => ("".to_string(), false),
+                _ => (String::new(), false),
             };
 
             // Create a span for this hook execution
@@ -58,19 +58,16 @@ pub fn create_post_tool_use_hook(callback_registry: Arc<HookCallbackRegistry>) -
                     let start_time = Instant::now();
 
                     // Only handle PostToolUse events
-                    let (tool_name, tool_input, tool_response) = match &input {
-                        HookInput::PostToolUse(post_tool) => (
-                            post_tool.tool_name.clone(),
-                            post_tool.tool_input.clone(),
-                            post_tool.tool_response.clone(),
-                        ),
-                        _ => {
-                            tracing::debug!("Ignoring non-PostToolUse event");
-                            return HookJsonOutput::Sync(SyncHookJsonOutput {
-                                continue_: Some(true),
-                                ..Default::default()
-                            });
-                        }
+                    let (tool_name, tool_input, tool_response) = if let HookInput::PostToolUse(post_tool) = &input { (
+                        post_tool.tool_name.clone(),
+                        post_tool.tool_input.clone(),
+                        post_tool.tool_response.clone(),
+                    ) } else {
+                        tracing::debug!("Ignoring non-PostToolUse event");
+                        return HookJsonOutput::Sync(SyncHookJsonOutput {
+                            continue_: Some(true),
+                            ..Default::default()
+                        });
                     };
 
                     // Get response preview for logging

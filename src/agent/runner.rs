@@ -11,6 +11,7 @@ use sacp::schema::{
 };
 use sacp::{ByteStreams, JrConnectionCx, MessageCx};
 use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
+use tokio_util::sync::CancellationToken;
 use tracing::Instrument;
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
@@ -18,6 +19,7 @@ use tracing_subscriber::util::SubscriberInitExt;
 use super::core::ClaudeAcpAgent;
 use super::handlers;
 use crate::cli::Cli;
+use crate::types::AgentError;
 
 // OpenTelemetry imports (only when feature is enabled)
 #[cfg(feature = "otel")]
@@ -402,6 +404,7 @@ async fn run_acp_server() -> Result<(), sacp::Error> {
     let agent = ClaudeAcpAgent::new();
     let config = Arc::new(agent.config().clone());
     let sessions = agent.sessions().clone();
+    let prompt_manager = agent.prompt_manager().clone();
     let agent_create_elapsed = agent_create_start.elapsed();
 
     tracing::info!(
@@ -448,7 +451,7 @@ async fn run_acp_server() -> Result<(), sacp::Error> {
             {
                 let config = config.clone();
                 let sessions = sessions.clone();
-                async move |request: NewSessionRequest, request_cx, _connection_cx| {
+                async move |request: NewSessionRequest, request_cx, connection_cx| {
                     let cwd = request.cwd.display().to_string();
                     let span = tracing::info_span!(
                         "handle_session_new",
@@ -458,7 +461,7 @@ async fn run_acp_server() -> Result<(), sacp::Error> {
 
                     async {
                         tracing::debug!("Received session/new request");
-                        match handlers::handle_new_session(request, &config, &sessions).await {
+                        match handlers::handle_new_session(request, &config, &sessions, connection_cx).await {
                             Ok(response) => request_cx.respond(response),
                             Err(e) => request_cx
                                 .respond_with_error(sacp::util::internal_error(e.to_string())),
@@ -503,10 +506,15 @@ async fn run_acp_server() -> Result<(), sacp::Error> {
         // which sends `session/request_permission` request and blocks waiting for response.
         // If we block in the handler directly, the incoming_protocol_actor cannot process
         // the response, causing a deadlock.
+        //
+        // NEW PROMPT CANCELLATION: When a new prompt arrives for a session that already
+        // has a prompt running, we first cancel the previous prompt to avoid multiple
+        // concurrent prompts for the same session.
         .on_receive_request(
             {
                 let config = config.clone();
                 let sessions = sessions.clone();
+                let prompt_manager = prompt_manager.clone();
                 async move |request: PromptRequest, request_cx, connection_cx| {
                     let session_id = request.session_id.0.clone();
                     let prompt_len = request.prompt.len();
@@ -523,29 +531,111 @@ async fn run_acp_server() -> Result<(), sacp::Error> {
                         session_id
                     );
 
+                    // IMPORTANT: Cancel any previous prompt for this session first
+                    // This prevents issues like cargo build blocking new prompts
+                    let session_id_str = session_id.to_string();
+                    prompt_manager.cancel_session_prompt(&session_id_str).await;
+
+                    // Create a cancellation token for this prompt
+                    let cancel_token = CancellationToken::new();
+
                     // Spawn the handler in a background task to avoid blocking the event loop.
-                    // This allows the incoming_protocol_actor to continue processing messages,
-                    // including responses to requests sent during prompt handling.
+                    //
+                    // DESIGN NOTE: We use a double-spawn pattern here:
+                    //
+                    // 1. Outer spawn (connection_cx.spawn):
+                    //    - Required by ACP protocol to avoid blocking the incoming_protocol_actor
+                    //    - Allows the protocol to continue processing messages (like permission responses)
+                    //    - Runs the prompt handling asynchronously
+                    //
+                    // 2. Inner spawn (tokio::spawn):
+                    //    - Required by PromptManager to track and cancel the prompt task
+                    //    - The PromptManager needs a JoinHandle to wait for task completion
+                    //    - This handle is registered and can be used for timeout-based cancellation
+                    //
+                    // 3. Oneshot channel:
+                    //    - Bridges the inner task (tracked by PromptManager) with the outer task
+                    //    - Sends the result back to be used for the ACP response
+                    //
+                    // Alternative considered: Use AbortHandle instead of JoinHandle
+                    // - Pros: Simpler, single spawn
+                    // - Cons: Can't wait for graceful shutdown, may leave resources leaked
+                    // - Decision: Current design is safer for resource cleanup
                     let config = config.clone();
                     let sessions = sessions.clone();
+                    let prompt_manager = prompt_manager.clone();
                     connection_cx.spawn({
                         let connection_cx = connection_cx.clone();
                         async move {
                             async {
                                 tracing::debug!(
                                     "Starting prompt handling for session {}",
-                                    session_id
+                                    session_id_str
                                 );
 
-                                // Handle the prompt with streaming
-                                match handlers::handle_prompt(
-                                    request,
-                                    &config,
-                                    &sessions,
-                                    connection_cx,
-                                )
-                                .await
-                                {
+                                // Create a channel to send the result back
+                                let (result_tx, result_rx) = tokio::sync::oneshot::channel();
+
+                                // Spawn the actual prompt handling task
+                                let handle = tokio::spawn({
+                                    let cancel_token = cancel_token.clone();
+                                    let session_id_for_log = session_id_str.clone();
+                                    // Clone connection_cx for use in spawned task
+                                    // Note: We clone here because connection_cx will be moved into the spawned async block
+                                    let connection_cx_inner = connection_cx.clone();
+                                    async move {
+                                        tracing::debug!(
+                                            session_id = %session_id_for_log,
+                                            "Prompt task started"
+                                        );
+
+                                        let result = handlers::handle_prompt(
+                                            request,
+                                            &config,
+                                            &sessions,
+                                            connection_cx_inner,
+                                            cancel_token,
+                                        )
+                                        .await;
+
+                                        // Send result through channel
+                                        // If receiver is dropped, the task panicked or was cancelled
+                                        if result_tx.send(result).is_err() {
+                                            tracing::warn!("Failed to send prompt result - receiver was dropped (task may have panicked)");
+                                        }
+
+                                        tracing::debug!(
+                                            session_id = %session_id_for_log,
+                                            "Prompt task completed"
+                                        );
+                                    }
+                                });
+
+                                // Register the prompt task
+                                let prompt_id = prompt_manager.register_prompt(
+                                    session_id_str.clone(),
+                                    handle,
+                                    cancel_token,
+                                );
+
+                                // Wait for the result
+                                let result = result_rx.await;
+                                let result = match result {
+                                    Ok(Ok(response)) => Ok(response),
+                                    Ok(Err(e)) => Err(e),
+                                    Err(_) => {
+                                        // Sender was dropped (task panicked)
+                                        Err(AgentError::Internal(
+                                            "Prompt task failed unexpectedly".to_string(),
+                                        ))
+                                    }
+                                };
+
+                                // Complete the prompt
+                                prompt_manager.complete_prompt(&session_id_str, &prompt_id);
+
+                                // Respond to the request
+                                match result {
                                     Ok(response) => request_cx.respond(response),
                                     Err(e) => {
                                         tracing::error!("Prompt error: {}", e);
