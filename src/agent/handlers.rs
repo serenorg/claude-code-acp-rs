@@ -6,10 +6,11 @@
 //! - session/prompt: Execute a prompt (Phase 1: simplified)
 //! - session/setMode: Set permission mode
 
+use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Instant;
 
-use futures::StreamExt;
+use futures::{Stream, StreamExt};
 use sacp::JrConnectionCx;
 use sacp::link::AgentToClient;
 use tokio_util::sync::CancellationToken;
@@ -393,6 +394,7 @@ pub async fn handle_prompt(
 
     // Get mutable client access and send the query
     let query_start = Instant::now();
+
     {
         let mut client = session.client_mut().await;
 
@@ -415,6 +417,12 @@ pub async fn handle_prompt(
     let mut stream = client.receive_response();
     let converter = session.converter();
     let mut cancel_rx = session.cancel_receiver();
+
+    // NOTE: drain_leftover_messages() is no longer needed because the SDK now
+    // implements query-scoped message channels for proper message isolation.
+    // Each receive_response() call gets its own isolated receiver, preventing
+    // late-arriving ResultMessages from being consumed by the wrong prompt.
+    // The function is kept for reference/debugging but not called.
 
     // Track streaming statistics
     let mut message_count = 0u64;
@@ -862,11 +870,71 @@ fn extract_text_from_content(blocks: &[ContentBlock]) -> String {
         .join("\n")
 }
 
+/// Drain leftover messages from the response stream
+///
+/// This function consumes and discards any messages remaining in the stream
+/// from a previous prompt. This is called after creating the stream but before
+/// processing the new prompt's responses.
+///
+/// The function uses a short timeout to avoid blocking indefinitely if there
+/// are no messages, and it logs any messages it drains for debugging.
+///
+/// **DEPRECATED**: This function is no longer needed because the SDK now
+/// implements query-scoped message channels for proper message isolation.
+/// Each receive_response() call gets its own isolated receiver, preventing
+/// late-arriving ResultMessages from being consumed by the wrong prompt.
+/// This function is kept for reference/debugging purposes only.
+#[allow(dead_code)]
+async fn drain_leftover_messages(
+    stream: &mut Pin<Box<dyn Stream<Item = Result<claude_code_agent_sdk::Message, claude_code_agent_sdk::ClaudeError>> + Send + '_>>,
+) {
+    use tokio::time::{timeout, Duration};
+
+    let mut drained_count = 0;
+    let max_drain_time = Duration::from_millis(100);
+
+    // Try to drain any leftover messages with a short timeout
+    let start = std::time::Instant::now();
+    while start.elapsed() < max_drain_time {
+        match timeout(Duration::from_millis(10), stream.next()).await {
+            Ok(Some(Ok(message))) => {
+                drained_count += 1;
+                // Log the drained message type for debugging
+                tracing::debug!(
+                    drained_message_type = format!("{:?}", message).chars().take(50).collect::<String>(),
+                    "Drained leftover message from previous prompt"
+                );
+            }
+            Ok(Some(Err(e))) => {
+                tracing::warn!(
+                    error = %e,
+                    "Drained error message from previous prompt"
+                );
+                drained_count += 1;
+            }
+            Ok(None) => {
+                // Stream ended
+                break;
+            }
+            Err(_) => {
+                // Timeout - no more messages available
+                break;
+            }
+        }
+    }
+
+    if drained_count > 0 {
+        tracing::info!(
+            drained_count,
+            "Drained leftover messages from previous prompt before processing new prompt"
+        );
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use sacp::schema::{ProtocolVersion, TextContent};
-    use std::path::PathBuf;
 
     #[test]
     fn test_handle_initialize() {
