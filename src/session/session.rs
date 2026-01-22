@@ -1162,7 +1162,7 @@ impl Session {
     ) {
         self.acp_mcp_server.set_session_id(&self.session_id);
         self.acp_mcp_server.set_connection(connection_cx);
-        self.acp_mcp_server.set_cwd(self.cwd.clone()).await;
+        self.acp_mcp_server.set_cwd(self.cwd.clone());
         self.acp_mcp_server
             .set_background_processes(self.background_processes.clone());
         self.acp_mcp_server

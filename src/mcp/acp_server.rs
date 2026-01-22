@@ -40,6 +40,16 @@ type CancelCallback = Arc<Mutex<Option<Box<dyn Fn() + Send + Sync>>>>;
 /// - ACP connection for sending notifications
 /// - Terminal API for command execution
 /// - Tool registry for built-in tools
+///
+/// # Lock Ordering (Critical for Deadlock Prevention)
+///
+/// To prevent deadlocks, follow this lock acquisition order:
+/// 1. OnceLock values (cwd) - lock-free after initialization
+/// 2. cancel_callback (Mutex) - use try_lock for non-critical access
+/// 3. OnceLock values (session_id, connection_cx, etc.) - lock-free
+///
+/// NEVER hold locks while calling tool.execute() as tools may need
+/// to send notifications that could deadlock.
 pub struct AcpMcpServer {
     /// Server name
     name: String,
@@ -62,8 +72,14 @@ pub struct AcpMcpServer {
     terminal_client: OnceLock<Arc<TerminalClient>>,
     /// Background process manager (set once at initialization)
     background_processes: OnceLock<Arc<BackgroundProcessManager>>,
-    /// Working directory (can be updated)
-    cwd: Arc<RwLock<std::path::PathBuf>>,
+    /// Working directory (set once at initialization)
+    ///
+    /// Uses OnceLock instead of RwLock because:
+    /// - cwd is set exactly once during session initialization
+    /// - All tools only read cwd (no tool ever modifies it)
+    /// - OnceLock provides lock-free reads after initialization
+    /// - No deadlock risk
+    cwd: OnceLock<std::path::PathBuf>,
     /// Permission checker for tool-level permission checks
     permission_checker: OnceLock<Arc<RwLock<PermissionChecker>>>,
     /// Cancel callback - called when MCP cancellation notification is received
@@ -95,7 +111,7 @@ impl AcpMcpServer {
             connection_cx: OnceLock::new(),
             terminal_client: OnceLock::new(),
             background_processes: OnceLock::new(),
-            cwd: Arc::new(RwLock::new(std::path::PathBuf::from("/tmp"))),
+            cwd: OnceLock::new(),
             permission_checker: OnceLock::new(),
             cancel_callback: Arc::new(Mutex::new(None)),
         }
@@ -141,10 +157,35 @@ impl AcpMcpServer {
         }
     }
 
-    /// Set the working directory
-    pub async fn set_cwd(&self, cwd: impl Into<std::path::PathBuf>) {
-        let mut guard = self.cwd.write().await;
-        *guard = cwd.into();
+    /// Set the working directory (synchronous, lock-free)
+    ///
+    /// Uses OnceLock to set the value on first call.
+    /// - First call: Sets the cwd
+    /// - Subsequent calls with same value: Silently ignored
+    /// - Subsequent calls with different value: Logs warning, ignored
+    ///
+    /// This is synchronous (not async) because OnceLock operations are
+    /// non-blocking and lock-free after initialization.
+    ///
+    /// # Deadlock Prevention
+    ///
+    /// OnceLock provides lock-free reads after initialization, eliminating
+    /// the deadlock risk that existed with RwLock.
+    pub fn set_cwd(&self, cwd: impl Into<std::path::PathBuf>) {
+        let new_cwd = cwd.into();
+        if let Some(existing) = self.cwd.get() {
+            if existing != &new_cwd {
+                tracing::warn!(
+                    existing = %existing.display(),
+                    new = %new_cwd.display(),
+                    "cwd already set with different value, ignoring new value"
+                );
+            }
+            // If already set, silently ignore (first value wins)
+            // This matches the pattern of other OnceLock setters in this struct
+        } else {
+            self.cwd.set(new_cwd).expect("Failed to set cwd");
+        }
     }
 
     /// Set the cancel callback
@@ -393,7 +434,15 @@ impl AcpMcpServer {
     }
 
     /// Create a tool context for tool execution
+    ///
+    /// # Deadlock Prevention
+    ///
+    /// OnceLock provides lock-free reads after initialization, eliminating
+    /// the deadlock risk that existed with RwLock.
     async fn create_tool_context(&self, tool_use_id: Option<&str>) -> ToolContext {
+        // OnceLock provides lock-free read after initialization
+        let cwd = self.cwd.get().expect("cwd not initialized").clone();
+
         // OnceLock provides lock-free access after initialization
         let session_id = self
             .session_id
@@ -401,13 +450,12 @@ impl AcpMcpServer {
             .map(|s| s.as_str())
             .unwrap_or("unknown");
 
-        let cwd = self.cwd.read().await;
         let terminal_client = self.terminal_client.get();
         let background_processes = self.background_processes.get();
         let connection_cx = self.connection_cx.get();
         let permission_checker = self.permission_checker.get();
 
-        let mut context = ToolContext::new(session_id.to_string(), cwd.clone());
+        let mut context = ToolContext::new(session_id.to_string(), cwd);
 
         if let Some(client) = terminal_client {
             context = context.with_terminal_client(client.clone());
@@ -433,6 +481,11 @@ impl AcpMcpServer {
     }
 
     /// Execute a tool with ACP integration
+    ///
+    /// # Deadlock Prevention
+    ///
+    /// OnceLock provides lock-free access to cwd after initialization,
+    /// eliminating the deadlock risk that existed with RwLock.
     #[instrument(
         name = "acp_execute_tool",
         skip(self, arguments),
@@ -473,7 +526,10 @@ impl AcpMcpServer {
             "Executing ACP tool"
         );
 
+        // CRITICAL: Create context with lock-free OnceLock access
         let context = self.create_tool_context(tool_use_id).await;
+
+        tracing::debug!("Tool context created, calling tool execution");
 
         // Special handling for Bash tool - use early return to match original behavior
         if tool_name == "Bash" {
@@ -504,6 +560,7 @@ impl AcpMcpServer {
         }
 
         // Execute other tools normally
+        // Note: OnceLock provides lock-free access, no locks to release
         let result = self
             .mcp_server
             .execute(tool_name, arguments, &context)
@@ -1337,7 +1394,7 @@ mod tests {
         let server = AcpMcpServer::new("test-server", "1.0.0");
 
         // Set a valid cwd for the test
-        server.set_cwd(std::env::temp_dir()).await;
+        server.set_cwd(std::env::temp_dir());
         server.set_session_id("test-session");
 
         let request = serde_json::json!({
@@ -1386,7 +1443,7 @@ mod tests {
     async fn test_handle_message_tools_call_with_tool_use_id() {
         // Test that tool_use_id is extracted from _meta
         let server = AcpMcpServer::new("test-server", "1.0.0");
-        server.set_cwd(std::env::temp_dir()).await;
+        server.set_cwd(std::env::temp_dir());
         server.set_session_id("test-session");
 
         let request = serde_json::json!({
@@ -1443,7 +1500,7 @@ mod tests {
     #[tokio::test]
     async fn test_handle_message_read_tool() {
         let server = AcpMcpServer::new("test-server", "1.0.0");
-        server.set_cwd(std::env::temp_dir()).await;
+        server.set_cwd(std::env::temp_dir());
         server.set_session_id("test-session");
 
         // Create a test file
@@ -1514,7 +1571,7 @@ mod tests {
     #[tokio::test]
     async fn test_execute_bash_without_terminal_client() {
         let server = AcpMcpServer::new("test-server", "1.0.0");
-        server.set_cwd(std::env::temp_dir()).await;
+        server.set_cwd(std::env::temp_dir());
         server.set_session_id("test-session");
 
         // Execute without terminal client (terminal_client is None by default)
@@ -1544,7 +1601,7 @@ mod tests {
 
         // Use the project's src directory for the glob test
         let cwd = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-        server.set_cwd(&cwd).await;
+        server.set_cwd(&cwd);
         server.set_session_id("test-session");
 
         let result = server
@@ -1573,7 +1630,7 @@ mod tests {
         let server = AcpMcpServer::new("test-server", "1.0.0");
 
         let cwd = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-        server.set_cwd(&cwd).await;
+        server.set_cwd(&cwd);
         server.set_session_id("test-session");
 
         let result = server
@@ -1605,7 +1662,7 @@ mod tests {
     async fn test_read_tool_error_propagation() {
         // Test that Read tool properly reports errors when file doesn't exist
         let server = AcpMcpServer::new("test-server", "1.0.0");
-        server.set_cwd(std::env::temp_dir()).await;
+        server.set_cwd(std::env::temp_dir());
         server.set_session_id("test-session");
 
         // Try to read a non-existent file
@@ -1681,7 +1738,7 @@ mod tests {
         // Test that Glob tool handles invalid patterns correctly
         let server = AcpMcpServer::new("test-server", "1.0.0");
         let cwd = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-        server.set_cwd(&cwd).await;
+        server.set_cwd(&cwd);
         server.set_session_id("test-session");
 
         // Use an invalid glob pattern (unclosed bracket)
@@ -1706,7 +1763,7 @@ mod tests {
     async fn test_bash_error_with_nonexistent_command() {
         // Test that Bash tool properly reports errors for invalid commands
         let server = AcpMcpServer::new("test-server", "1.0.0");
-        server.set_cwd(std::env::temp_dir()).await;
+        server.set_cwd(std::env::temp_dir());
         server.set_session_id("test-session");
 
         let result = server
@@ -1740,7 +1797,7 @@ mod tests {
         // Test that lock acquisition order is consistent across different code paths
         let server = std::sync::Arc::new(AcpMcpServer::new("test-server", "1.0.0"));
         let cwd = std::env::temp_dir();
-        server.set_cwd(&cwd).await;
+        server.set_cwd(&cwd);
         server.set_session_id("test-session");
 
         // Create a barrier to synchronize tasks
