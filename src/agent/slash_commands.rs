@@ -7,9 +7,8 @@ use sacp::schema::{AvailableCommand, AvailableCommandInput, UnstructuredCommandI
 
 /// Cached regex for matching MCP command format
 /// Pattern: /mcp:server:name [args]
-static MCP_COMMAND_REGEX: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
-    regex::Regex::new(r"^/mcp:([^:\s]+):(\S+)(\s+.*)?$").unwrap()
-});
+static MCP_COMMAND_REGEX: std::sync::LazyLock<regex::Regex> =
+    std::sync::LazyLock::new(|| regex::Regex::new(r"^/mcp:([^:\s]+):(\S+)(\s+.*)?$").unwrap());
 
 /// Predefined slash commands
 ///
@@ -17,18 +16,19 @@ static MCP_COMMAND_REGEX: std::sync::LazyLock<regex::Regex> = std::sync::LazyLoc
 /// The client can display them to users for quick access.
 pub fn get_predefined_commands() -> Vec<AvailableCommand> {
     vec![
-        AvailableCommand::new("compact", "Compact conversation with optional focus instructions")
-            .input(Some(AvailableCommandInput::Unstructured(
-                UnstructuredCommandInput::new("[instructions]"),
-            ))),
-        AvailableCommand::new("init", "Initialize project with CLAUDE.md guide")
-            .input(Some(AvailableCommandInput::Unstructured(
-                UnstructuredCommandInput::new(""),
-            ))),
-        AvailableCommand::new("review", "Request code review")
-            .input(Some(AvailableCommandInput::Unstructured(
-                UnstructuredCommandInput::new("[scope or file]"),
-            ))),
+        AvailableCommand::new(
+            "compact",
+            "Compact conversation with optional focus instructions",
+        )
+        .input(Some(AvailableCommandInput::Unstructured(
+            UnstructuredCommandInput::new("[instructions]"),
+        ))),
+        AvailableCommand::new("init", "Initialize project with CLAUDE.md guide").input(Some(
+            AvailableCommandInput::Unstructured(UnstructuredCommandInput::new("")),
+        )),
+        AvailableCommand::new("review", "Request code review").input(Some(
+            AvailableCommandInput::Unstructured(UnstructuredCommandInput::new("[scope or file]")),
+        )),
     ]
 }
 
@@ -61,10 +61,7 @@ mod tests {
             "/server:cmd (MCP) some args"
         );
         // Regular command (no transformation)
-        assert_eq!(
-            transform_mcp_command_input("/compact"),
-            "/compact"
-        );
+        assert_eq!(transform_mcp_command_input("/compact"), "/compact");
         // MCP command without args
         assert_eq!(
             transform_mcp_command_input("/mcp:test:run"),
@@ -108,7 +105,10 @@ mod tests {
     #[test]
     fn test_regular_slash_command() {
         assert_eq!(transform_mcp_command_input("/commit"), "/commit");
-        assert_eq!(transform_mcp_command_input("/review file.rs"), "/review file.rs");
+        assert_eq!(
+            transform_mcp_command_input("/review file.rs"),
+            "/review file.rs"
+        );
     }
 
     #[test]

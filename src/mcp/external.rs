@@ -138,7 +138,8 @@ impl ExternalMcpServer {
 
         // Build the command using CommandWrap for process group support
         let mut cmd = CommandWrap::with_new(command, |c| {
-            let cmd = c.args(args)
+            let cmd = c
+                .args(args)
                 .stdin(Stdio::piped())
                 .stdout(Stdio::piped())
                 .stderr(Stdio::null());
@@ -193,7 +194,10 @@ impl ExternalMcpServer {
         );
 
         // Take stdin and stdout before wrapping
-        let stdin = wrapped_child.stdin().take().ok_or(ExternalMcpError::NoStdin)?;
+        let stdin = wrapped_child
+            .stdin()
+            .take()
+            .ok_or(ExternalMcpError::NoStdin)?;
         let stdout = wrapped_child
             .stdout()
             .take()
@@ -281,16 +285,16 @@ impl ExternalMcpServer {
             let init_response = self.send_request_internal(request).await?;
 
             // Log server info if available
-            if let Some(ref result) = init_response.result {
-                if let Some(server_info) = result.get("serverInfo") {
-                    tracing::info!(
-                        server_name = %self.name,
-                        remote_server_name = ?server_info.get("name"),
-                        remote_server_version = ?server_info.get("version"),
-                        protocol_version = ?result.get("protocolVersion"),
-                        "Received initialize response from MCP server"
-                    );
-                }
+            if let Some(ref result) = init_response.result
+                && let Some(server_info) = result.get("serverInfo")
+            {
+                tracing::info!(
+                    server_name = %self.name,
+                    remote_server_name = ?server_info.get("name"),
+                    remote_server_version = ?server_info.get("version"),
+                    protocol_version = ?result.get("protocolVersion"),
+                    "Received initialize response from MCP server"
+                );
             }
 
             // Send initialized notification
@@ -314,37 +318,36 @@ impl ExternalMcpServer {
             let tools_response = self.send_request_internal(tools_request).await?;
 
             // Parse tools from response
-            if let Some(result) = tools_response.result {
-                if let Some(tools) = result.get("tools").and_then(|t| t.as_array()) {
-                    self.tools = tools
-                        .iter()
-                        .filter_map(|t| {
-                            let name = t.get("name")?.as_str()?;
-                            let description =
-                                t.get("description").and_then(|d| d.as_str()).unwrap_or("");
-                            let input_schema = t
-                                .get("inputSchema")
-                                .cloned()
-                                .unwrap_or(serde_json::json!({"type": "object"}));
+            if let Some(result) = tools_response.result
+                && let Some(tools) = result.get("tools").and_then(|t| t.as_array())
+            {
+                self.tools = tools
+                    .iter()
+                    .filter_map(|t| {
+                        let name = t.get("name")?.as_str()?;
+                        let description =
+                            t.get("description").and_then(|d| d.as_str()).unwrap_or("");
+                        let input_schema = t
+                            .get("inputSchema")
+                            .cloned()
+                            .unwrap_or(serde_json::json!({"type": "object"}));
 
-                            Some(ToolSchema {
-                                name: name.to_string(),
-                                description: description.to_string(),
-                                input_schema,
-                            })
+                        Some(ToolSchema {
+                            name: name.to_string(),
+                            description: description.to_string(),
+                            input_schema,
                         })
-                        .collect();
+                    })
+                    .collect();
 
-                    // Log tool names
-                    let tool_names: Vec<&str> =
-                        self.tools.iter().map(|t| t.name.as_str()).collect();
-                    tracing::info!(
-                        server_name = %self.name,
-                        tool_count = self.tools.len(),
-                        tools = ?tool_names,
-                        "Received tools from MCP server"
-                    );
-                }
+                // Log tool names
+                let tool_names: Vec<&str> = self.tools.iter().map(|t| t.name.as_str()).collect();
+                tracing::info!(
+                    server_name = %self.name,
+                    tool_count = self.tools.len(),
+                    tools = ?tool_names,
+                    "Received tools from MCP server"
+                );
             }
 
             Ok::<(), ExternalMcpError>(())
@@ -421,7 +424,9 @@ impl ExternalMcpServer {
             tokio::time::timeout(DEFAULT_REQUEST_TIMEOUT, self.send_request_internal(request))
                 .await;
 
-        if let Ok(inner_result) = result { inner_result } else {
+        if let Ok(inner_result) = result {
+            inner_result
+        } else {
             tracing::error!(
                 server_name = %self.name,
                 method = %method,
@@ -1015,7 +1020,9 @@ impl ExternalMcpManager {
             .filter_map(|entry| {
                 let server = entry.value();
                 // Try to lock the mutex (non-blocking)
-                if let Ok(guard) = server.try_lock() { Some(guard.stats()) } else {
+                if let Ok(guard) = server.try_lock() {
+                    Some(guard.stats())
+                } else {
                     tracing::warn!(
                         server_name = %entry.key(),
                         "MCP server is busy, skipping for stats"
@@ -1284,7 +1291,10 @@ mod tests {
 
         // Disconnecting a non-existent server should succeed (idempotent)
         let result = manager.disconnect("nonexistent-server").await;
-        assert!(result.is_ok(), "Disconnecting non-existent server should be OK");
+        assert!(
+            result.is_ok(),
+            "Disconnecting non-existent server should be OK"
+        );
 
         // Still no servers
         assert!(manager.server_names().is_empty());
@@ -1297,7 +1307,10 @@ mod tests {
 
         // Disconnecting a non-existent server should not error
         let result = manager.disconnect("nonexistent-server").await;
-        assert!(result.is_ok(), "Disconnecting non-existent server should be OK");
+        assert!(
+            result.is_ok(),
+            "Disconnecting non-existent server should be OK"
+        );
     }
 
     /// Test cleanup method on ExternalMcpServer directly

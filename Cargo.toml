@@ -161,36 +161,3 @@ verbose-debug = []
 [patch.crates-io]
 # Patch sacp to use fork with flush mechanism during development
 sacp = { git = "https://github.com/soddygo/symposium-acp.git", branch = "main" }
-
-
-[lints.rust]
-future_incompatible = { level = "warn", priority = -1 }
-let-underscore = "warn"
-missing_debug_implementations = "warn"
-nonstandard_style = { level = "warn", priority = -1 }
-rust_2018_idioms = { level = "warn", priority = -1 }
-unused = { level = "warn", priority = -1 }
-
-[lints.clippy]
-pedantic = { level = "warn", priority = -1 }
-doc_markdown = "allow"
-missing_errors_doc = "allow"
-missing_panics_doc = "allow"
-must_use_candidate = "allow"
-needless_pass_by_value = "allow"
-similar_names = "allow"
-struct_field_names = "allow"
-too_many_lines = "allow"
-wildcard_imports = "allow"
-module_name_repetitions = "allow"
-return_self_not_must_use = "allow"
-unnecessary_literal_bound = "allow"
-trivially_copy_pass_by_ref = "allow"
-uninlined_format_args = "allow"
-format_push_string = "allow"
-map_unwrap_or = "allow"
-collapsible_if = "allow"
-manual_non_exhaustive = "allow"
-match_same_arms = "allow"
-redundant_closure_for_method_calls = "allow"
-unused_self = "allow"

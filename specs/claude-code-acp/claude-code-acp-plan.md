@@ -1,86 +1,86 @@
-# Claude Code ACP Agent (Rust) 开发计划
+# Claude Code ACP Agent (Rust) Development Plan
 
-## 概述
+## Overview
 
-本文档基于 `claude-code-acp-spec.md` 技术设计文档，制定详细的开发计划。
+This document provides a detailed development plan based on the technical design in `claude-code-acp-spec.md`.
 
-**目标**: 实现一个 Rust 版本的 ACP (Agent Client Protocol) Agent，使 Zed 等 ACP 兼容编辑器能够使用 Claude Code 的能力。
+**Goal**: Implement a Rust ACP (Agent Client Protocol) agent so that Zed and other ACP-compatible editors can use Claude Code.
 
-**项目特点**:
-- 单一 crate 结构，便于发布到 crates.io
-- 支持 Meta 字段（systemPrompt、resume session_id）
-- 支持环境变量配置国内大模型
+**Project characteristics**:
+- Single-crate structure to make publishing to crates.io easier
+- Support Meta fields (`systemPrompt`, `resume` session_id)
+- Support configuring alternative model endpoints via environment variables
 
 ---
 
-## Phase 1: 项目骨架搭建
+## Phase 1: Project scaffolding
 
-### 1.1 项目初始化
+### 1.1 Project initialization
 
-**任务列表**:
+**Task list**:
 
-- [ ] 1.1.1 创建 `Cargo.toml`
-  - 配置 package 信息（name, description, keywords, categories）
-  - 配置 bin 和 lib targets
-  - 添加所有依赖
+- [ ] 1.1.1 Create `Cargo.toml`
+  - Configure package metadata (name, description, keywords, categories)
+  - Configure bin and lib targets
+  - Add all dependencies
 
-- [ ] 1.1.2 创建 `src/main.rs` CLI 入口
-  - 基础日志初始化 (tracing-subscriber)
-  - 调用 `claude_code_acp::run_acp()`
+- [ ] 1.1.2 Create `src/main.rs` CLI entry
+  - Basic logging initialization (tracing-subscriber)
+  - Call `claude_code_acp::run_acp()`
 
-- [ ] 1.1.3 创建 `src/lib.rs` 库入口
-  - 模块声明
-  - 公共 API 导出
+- [ ] 1.1.3 Create `src/lib.rs` library entry
+  - Module declarations
+  - Public API exports
 
-- [ ] 1.1.4 配置 `rust-toolchain.toml`
-  - 指定 Rust Edition 2024
-  - 配置 nightly channel（如需要 2024 edition）
+- [ ] 1.1.4 Configure `rust-toolchain.toml`
+  - Use Rust Edition 2024
+  - Configure nightly channel (if needed for edition 2024)
 
-- [ ] 1.1.5 配置 `.gitignore` 和 `rustfmt.toml`
+- [ ] 1.1.5 Configure `.gitignore` and `rustfmt.toml`
 
-### 1.2 创建模块骨架
+### 1.2 Create module skeletons
 
-按依赖顺序创建各模块:
+Create modules in dependency order:
 
-- [ ] 1.2.1 创建 `src/types/` 公共类型模块
+- [ ] 1.2.1 Create `src/types/` shared types module
   ```
   src/types/
   ├── mod.rs
-  ├── error.rs        # AgentError 定义
-  ├── config.rs       # AgentConfig 定义
+  ├── error.rs        # AgentError definition
+  ├── config.rs       # AgentConfig definition
   ├── meta.rs         # NewSessionMeta, SystemPromptMeta, ClaudeCodeMeta
-  ├── session.rs      # TokenUsage, SessionStats 等
-  ├── tool.rs         # ToolInfo, ToolKind 等
+  ├── session.rs      # TokenUsage, SessionStats, etc.
+  ├── tool.rs         # ToolInfo, ToolKind, etc.
   └── notification.rs
   ```
 
-- [ ] 1.2.2 创建 `src/converter/` 消息转换模块
+- [ ] 1.2.2 Create `src/converter/` message conversion module
   ```
   src/converter/
   ├── mod.rs
-  ├── prompt.rs       # ACP → SDK 转换
-  ├── notification.rs # SDK → ACP 转换
-  └── tool.rs         # 工具信息提取
+  ├── prompt.rs       # ACP → SDK conversion
+  ├── notification.rs # SDK → ACP conversion
+  └── tool.rs         # Tool metadata extraction
   ```
 
-- [ ] 1.2.3 创建 `src/settings/` 设置管理模块
+- [ ] 1.2.3 Create `src/settings/` settings management module
   ```
   src/settings/
   ├── mod.rs
   └── manager.rs
   ```
 
-- [ ] 1.2.4 创建 `src/session/` 会话管理模块
+- [ ] 1.2.4 Create `src/session/` session management module
   ```
   src/session/
   ├── mod.rs
   ├── manager.rs      # SessionManager
-  ├── state.rs        # Session 状态
+  ├── state.rs        # Session state
   ├── permission.rs   # PermissionHandler
   └── usage.rs        # UsageTracker
   ```
 
-- [ ] 1.2.5 创建 `src/mcp/` MCP Server 模块
+- [ ] 1.2.5 Create `src/mcp/` MCP server module
   ```
   src/mcp/
   ├── mod.rs
@@ -93,30 +93,30 @@
       └── bash.rs
   ```
 
-- [ ] 1.2.6 创建 `src/agent/` Agent 核心模块
+- [ ] 1.2.6 Create `src/agent/` agent core module
   ```
   src/agent/
   ├── mod.rs
   ├── core.rs         # ClaudeAcpAgent
-  ├── handlers.rs     # ACP 请求处理器
+  ├── handlers.rs     # ACP request handlers
   └── runner.rs       # run_acp()
   ```
 
-- [ ] 1.2.7 创建 `src/util/` 工具函数模块
+- [ ] 1.2.7 Create `src/util/` utilities module
 
-### 1.3 验证构建
+### 1.3 Build verification
 
-- [ ] 1.3.1 确保 `cargo build` 成功
-- [ ] 1.3.2 确保 `cargo test` 通过（空测试）
-- [ ] 1.3.3 确保 `cargo clippy` 无警告
+- [ ] 1.3.1 Ensure `cargo build` succeeds
+- [ ] 1.3.2 Ensure `cargo test` passes (empty tests)
+- [ ] 1.3.3 Ensure `cargo clippy` has no warnings
 
 ---
 
-## Phase 2: 公共类型实现 (types/)
+## Phase 2: Shared types implementation (types/)
 
-### 2.1 错误类型
+### 2.1 Error types
 
-- [ ] 2.1.1 实现 `AgentError` 枚举
+- [ ] 2.1.1 Implement `AgentError` enum
   - SessionNotFound
   - AuthRequired
   - InvalidMode
@@ -126,91 +126,91 @@
   - JsonError
   - Internal
 
-- [ ] 2.1.2 实现 `From<AgentError> for sacp::RequestError`
+- [ ] 2.1.2 Implement `From<AgentError> for sacp::RequestError`
 
-### 2.2 配置类型
+### 2.2 Configuration types
 
-- [ ] 2.2.1 实现 `AgentConfig`
+- [ ] 2.2.1 Implement `AgentConfig`
   - `base_url: Option<String>`
   - `auth_token: Option<String>`
   - `model: Option<String>`
   - `small_fast_model: Option<String>`
 
-- [ ] 2.2.2 实现 `AgentConfig::from_env()`
-  - 读取 `ANTHROPIC_BASE_URL`
-  - 读取 `ANTHROPIC_AUTH_TOKEN`
-  - 读取 `ANTHROPIC_MODEL`
-  - 读取 `ANTHROPIC_SMALL_FAST_MODEL`
+- [ ] 2.2.2 Implement `AgentConfig::from_env()`
+  - Read `ANTHROPIC_BASE_URL`
+  - Read `ANTHROPIC_AUTH_TOKEN`
+  - Read `ANTHROPIC_MODEL`
+  - Read `ANTHROPIC_SMALL_FAST_MODEL`
 
-- [ ] 2.2.3 实现 `AgentConfig::apply_to_options()`
+- [ ] 2.2.3 Implement `AgentConfig::apply_to_options()`
 
-### 2.3 Meta 字段类型 (新增)
+### 2.3 Meta field types (new)
 
-- [ ] 2.3.1 实现 `SystemPromptMeta` 结构
-  - `append: Option<String>` - 追加到系统提示词
-  - `replace: Option<String>` - 替换系统提示词
-  - `from_meta()` 解析方法
+- [ ] 2.3.1 Implement `SystemPromptMeta` struct
+  - `append: Option<String>` - append to system prompt
+  - `replace: Option<String>` - replace system prompt
+  - `from_meta()` parse helper
 
-- [ ] 2.3.2 实现 `ClaudeCodeMeta` 结构
+- [ ] 2.3.2 Implement `ClaudeCodeMeta` struct
   - `options: Option<ClaudeCodeOptions>`
-  - `from_meta()` 解析方法
-  - `get_resume_session_id()` 获取恢复会话 ID
+  - `from_meta()` parse helper
+  - `get_resume_session_id()` helper
 
-- [ ] 2.3.3 实现 `ClaudeCodeOptions` 结构
-  - `resume: Option<String>` - 要恢复的会话 ID
+- [ ] 2.3.3 Implement `ClaudeCodeOptions` struct
+  - `resume: Option<String>` - session id to resume
 
-- [ ] 2.3.4 实现 `NewSessionMeta` 结构
+- [ ] 2.3.4 Implement `NewSessionMeta` struct
   - `system_prompt: Option<SystemPromptMeta>`
   - `claude_code: Option<ClaudeCodeMeta>`
-  - `from_request_meta()` 统一解析方法
-  - `get_system_prompt_append()` 获取追加提示词
-  - `get_resume_session_id()` 获取恢复会话 ID
+  - `from_request_meta()` unified parse helper
+  - `get_system_prompt_append()` helper
+  - `get_resume_session_id()` helper
 
-### 2.4 会话类型
+### 2.4 Session types
 
-- [ ] 2.4.1 实现 `TokenUsage` 结构
+- [ ] 2.4.1 Implement `TokenUsage` struct
   - `input_tokens: u64`
   - `output_tokens: u64`
   - `cache_read_input_tokens: Option<u64>`
   - `cache_creation_input_tokens: Option<u64>`
 
-- [ ] 2.4.2 实现 `TokenUsage::from_sdk_usage()`
-- [ ] 2.4.3 实现 `TokenUsage::add()`
-- [ ] 2.4.4 实现 `SessionStats` 结构
+- [ ] 2.4.2 Implement `TokenUsage::from_sdk_usage()`
+- [ ] 2.4.3 Implement `TokenUsage::add()`
+- [ ] 2.4.4 Implement `SessionStats` struct
 
-### 2.5 工具类型
+### 2.5 Tool types
 
-- [ ] 2.5.1 实现 `ToolKind` 枚举
-- [ ] 2.5.2 实现 `ToolInfo` 结构
-- [ ] 2.5.3 实现 `ToolCallLocation` 结构
-- [ ] 2.5.4 实现 `ToolUseEntry` 和 `ToolUseType`
+- [ ] 2.5.1 Implement `ToolKind` enum
+- [ ] 2.5.2 Implement `ToolInfo` struct
+- [ ] 2.5.3 Implement `ToolCallLocation` struct
+- [ ] 2.5.4 Implement `ToolUseEntry` and `ToolUseType`
 
-### 2.6 单元测试
+### 2.6 Unit tests
 
-- [ ] 2.6.1 `AgentConfig::from_env()` 测试
-- [ ] 2.6.2 `NewSessionMeta::from_request_meta()` 测试
-- [ ] 2.6.3 `TokenUsage` 序列化/反序列化测试
-- [ ] 2.6.4 错误转换测试
+- [ ] 2.6.1 `AgentConfig::from_env()` tests
+- [ ] 2.6.2 `NewSessionMeta::from_request_meta()` tests
+- [ ] 2.6.3 `TokenUsage` serialization/deserialization tests
+- [ ] 2.6.4 Error conversion tests
 
 ---
 
-## Phase 3: 消息转换实现 (converter/)
+## Phase 3: Message conversion implementation (converter/)
 
-### 3.1 Prompt 转换 (ACP → SDK)
+### 3.1 Prompt conversion (ACP → SDK)
 
-- [ ] 3.1.1 实现 `PromptConverter` 结构
-- [ ] 3.1.2 实现 `convert_text_chunk()` - 文本块转换
-- [ ] 3.1.3 实现 `convert_resource_link()` - 资源链接转换
-- [ ] 3.1.4 实现 `convert_resource()` - 资源内容转换
-- [ ] 3.1.5 实现 `convert_image()` - 图片转换为 `UserContentBlock::image_*`
+- [ ] 3.1.1 Implement `PromptConverter` struct
+- [ ] 3.1.2 Implement `convert_text_chunk()` - text chunk conversion
+- [ ] 3.1.3 Implement `convert_resource_link()` - resource link conversion
+- [ ] 3.1.4 Implement `convert_resource()` - embedded resource conversion
+- [ ] 3.1.5 Implement `convert_image()` - image → `UserContentBlock::image_*`
 
-### 3.2 通知转换 (SDK → ACP)
+### 3.2 Notification conversion (SDK → ACP)
 
-- [ ] 3.2.1 实现 `NotificationConverter` 结构
-- [ ] 3.2.2 实现 `convert_message()` - 主转换入口
-- [ ] 3.2.3 实现 `convert_assistant_message()` - 处理 ContentBlock
-- [ ] 3.2.4 实现 `convert_stream_event()` - 处理增量事件
-- [ ] 3.2.5 实现各类通知生成方法:
+- [ ] 3.2.1 Implement `NotificationConverter` struct
+- [ ] 3.2.2 Implement `convert_message()` - main entry
+- [ ] 3.2.3 Implement `convert_assistant_message()` - ContentBlock conversion
+- [ ] 3.2.4 Implement `convert_stream_event()` - delta event conversion
+- [ ] 3.2.5 Implement notification builders:
   - `make_agent_message_notification()`
   - `make_agent_message_chunk_notification()`
   - `make_agent_thought_notification()`
@@ -218,302 +218,302 @@
   - `make_tool_call_notification()`
   - `make_tool_result_notification()`
 
-### 3.3 工具信息提取
+### 3.3 Tool metadata extraction
 
-- [ ] 3.3.1 实现 `extract_tool_info()` - 从工具名称和输入提取 UI 友好信息
-- [ ] 3.3.2 支持的工具类型:
+- [ ] 3.3.1 Implement `extract_tool_info()` - extract UI-friendly metadata from tool name + input
+- [ ] 3.3.2 Supported tool types:
   - Read/Write/Edit → ToolKind::Read/Edit
   - Bash → ToolKind::Execute
   - Grep/Glob → ToolKind::Search
   - WebFetch → ToolKind::Fetch
 
-### 3.4 单元测试
+### 3.4 Unit tests
 
-- [ ] 3.4.1 文本转换测试
-- [ ] 3.4.2 图片转换测试
-- [ ] 3.4.3 工具调用通知测试
-- [ ] 3.4.4 流式事件转换测试
+- [ ] 3.4.1 Text conversion tests
+- [ ] 3.4.2 Image conversion tests
+- [ ] 3.4.3 Tool-call notification tests
+- [ ] 3.4.4 Streaming event conversion tests
 
 ---
 
-## Phase 4: 会话管理实现 (session/)
+## Phase 4: Session management implementation (session/)
 
-### 4.1 UsageTracker 实现
+### 4.1 UsageTracker implementation
 
-- [ ] 4.1.1 实现 `UsageTracker` 结构
+- [ ] 4.1.1 Implement `UsageTracker` struct
   - `total_usage: RwLock<TokenUsage>`
   - `total_cost_usd: AtomicU64`
 
-- [ ] 4.1.2 实现 `update_from_result()` - 从 ResultMessage 更新
-- [ ] 4.1.3 实现 `get_usage()` 和 `get_cost_usd()`
+- [ ] 4.1.2 Implement `update_from_result()` - update from ResultMessage
+- [ ] 4.1.3 Implement `get_usage()` and `get_cost_usd()`
 
-### 4.2 PermissionHandler 实现
+### 4.2 PermissionHandler implementation
 
-- [ ] 4.2.1 实现 `PermissionHandler` 结构
+- [ ] 4.2.1 Implement `PermissionHandler` struct
   - `pending_requests: DashMap<String, PendingPermissionRequest>`
   - `notifier: Arc<dyn AcpNotifier>`
 
-- [ ] 4.2.2 实现 `PendingPermissionRequest` 结构
-- [ ] 4.2.3 实现 `create_can_use_tool_callback()` - 创建 SDK 权限回调
-- [ ] 4.2.4 实现 `handle_permission_response()` - 处理 ACP 客户端响应
-- [ ] 4.2.5 实现 `acp_mode_to_sdk_mode()` 和 `sdk_mode_to_acp_mode()`
+- [ ] 4.2.2 Implement `PendingPermissionRequest` struct
+- [ ] 4.2.3 Implement `create_can_use_tool_callback()` - create SDK permission callback
+- [ ] 4.2.4 Implement `handle_permission_response()` - handle ACP client responses
+- [ ] 4.2.5 Implement `acp_mode_to_sdk_mode()` and `sdk_mode_to_acp_mode()`
 
-### 4.3 Session 实现
+### 4.3 Session implementation
 
-- [ ] 4.3.1 实现 `Session` 结构
+- [ ] 4.3.1 Implement `Session` struct
   - `client: ClaudeClient`
   - `cancelled: AtomicBool`
   - `permission_mode: RwLock<SdkPermissionMode>`
   - `usage_tracker: UsageTracker`
   - `converter: NotificationConverter`
-  - `system_prompt_append: Option<String>` (新增: 来自 meta)
+  - `system_prompt_append: Option<String>` (new: from meta)
 
-- [ ] 4.3.2 实现 `Session::new()` - 创建会话并连接 ClaudeClient
-  - 支持 `meta.systemPrompt.append` 追加系统提示词
-  - 支持 `meta.claudeCode.options.resume` 恢复会话
+- [ ] 4.3.2 Implement `Session::new()` - create session and connect ClaudeClient
+  - Support `meta.systemPrompt.append` appending a system prompt
+  - Support `meta.claudeCode.options.resume` resuming a session
 
-- [ ] 4.3.3 实现 `Session::prompt()` - 发送内容并返回消息流
-- [ ] 4.3.4 实现 `Session::prompt_text()` - 发送文本 prompt
-- [ ] 4.3.5 实现 `Session::interrupt()` - 中断当前执行
-- [ ] 4.3.6 实现 `Session::set_permission_mode()` - 设置权限模式
-- [ ] 4.3.7 实现 `Session::set_model()` - 动态切换模型
-- [ ] 4.3.8 实现 `Session::process_response_stream()` - 处理消息流
-- [ ] 4.3.9 实现 `Session::disconnect()` - 断开连接
+- [ ] 4.3.3 Implement `Session::prompt()` - send content and return a message stream
+- [ ] 4.3.4 Implement `Session::prompt_text()` - send a text prompt
+- [ ] 4.3.5 Implement `Session::interrupt()` - interrupt current execution
+- [ ] 4.3.6 Implement `Session::set_permission_mode()` - set permission mode
+- [ ] 4.3.7 Implement `Session::set_model()` - switch model dynamically
+- [ ] 4.3.8 Implement `Session::process_response_stream()` - process response stream
+- [ ] 4.3.9 Implement `Session::disconnect()` - disconnect
 
-### 4.4 SessionManager 实现
+### 4.4 SessionManager implementation
 
-- [ ] 4.4.1 实现 `SessionManager` 结构
+- [ ] 4.4.1 Implement `SessionManager` struct
   - `sessions: DashMap<String, Arc<RwLock<Session>>>`
   - `config: AgentConfig`
   - `permission_handler: Arc<PermissionHandler>`
 
-- [ ] 4.4.2 实现 `create_session()` - 创建新会话
-  - 接收 `NewSessionMeta` 参数处理 systemPrompt 和 resume
+- [ ] 4.4.2 Implement `create_session()` - create a new session
+  - Accept `NewSessionMeta` to handle systemPrompt and resume
 
-- [ ] 4.4.3 实现 `get_session()` - 获取会话
-- [ ] 4.4.4 实现 `remove_session()` - 移除并断开会话
-- [ ] 4.4.5 实现 `get_session_stats()` - 获取统计信息
+- [ ] 4.4.3 Implement `get_session()` - fetch a session
+- [ ] 4.4.4 Implement `remove_session()` - remove and disconnect a session
+- [ ] 4.4.5 Implement `get_session_stats()` - fetch stats
 
-### 4.5 单元测试
+### 4.5 Unit tests
 
-- [ ] 4.5.1 UsageTracker 更新测试
-- [ ] 4.5.2 权限模式转换测试
-- [ ] 4.5.3 SessionManager 并发测试
-- [ ] 4.5.4 Meta 解析和会话创建测试
+- [ ] 4.5.1 UsageTracker update tests
+- [ ] 4.5.2 Permission mode conversion tests
+- [ ] 4.5.3 SessionManager concurrency tests
+- [ ] 4.5.4 Meta parsing and session creation tests
 
 ---
 
-## Phase 5: Agent 核心实现 (agent/)
+## Phase 5: Agent core implementation (agent/)
 
-### 5.1 ClaudeAcpAgent 结构
+### 5.1 ClaudeAcpAgent structure
 
-- [ ] 5.1.1 实现 `ClaudeAcpAgent` 结构
+- [ ] 5.1.1 Implement `ClaudeAcpAgent` struct
   - `session_manager: SessionManager`
   - `config: AgentConfig`
   - `permission_handler: Arc<PermissionHandler>`
 
-- [ ] 5.1.2 实现 `ClaudeAcpAgent::new()`
+- [ ] 5.1.2 Implement `ClaudeAcpAgent::new()`
 
-### 5.2 ACP 请求处理器
+### 5.2 ACP request handlers
 
-- [ ] 5.2.1 实现 `initialize()` 处理器
-  - 返回 Agent 能力信息
-  - 设置 client capabilities
+- [ ] 5.2.1 Implement `initialize()` handler
+  - Return agent capability info
+  - Set client capabilities
 
-- [ ] 5.2.2 实现 `authenticate()` 处理器（可选）
+- [ ] 5.2.2 Implement `authenticate()` handler (optional)
 
-- [ ] 5.2.3 实现 `new_session()` 处理器
-  - 解析 `_meta` 字段获取 `NewSessionMeta`
-  - 处理 `systemPrompt` 追加
-  - 处理 `claudeCode.options.resume` 恢复会话
-  - 调用 `SessionManager::create_session()`
-  - 返回 session_id 和 supported_modes
+- [ ] 5.2.3 Implement `new_session()` handler
+  - Parse `_meta` into `NewSessionMeta`
+  - Handle `systemPrompt` append
+  - Handle `claudeCode.options.resume` resume
+  - Call `SessionManager::create_session()`
+  - Return session_id and supported_modes
 
-- [ ] 5.2.4 实现 `load_session()` 处理器
-  - 同样支持 `_meta` 字段解析
+- [ ] 5.2.4 Implement `load_session()` handler
+  - Also support `_meta` parsing
 
-- [ ] 5.2.5 实现 `prompt()` 处理器
-  - 获取 session
-  - 转换 ACP content 为 SDK UserContentBlock
-  - 调用 `session.prompt()`
-  - 处理响应流并发送通知
-  - 返回 PromptResponse
+- [ ] 5.2.5 Implement `prompt()` handler
+  - Fetch session
+  - Convert ACP content to SDK `UserContentBlock`
+  - Call `session.prompt()`
+  - Process response stream and send notifications
+  - Return `PromptResponse`
 
-- [ ] 5.2.6 实现 `cancel()` 处理器
-  - 调用 `session.interrupt()`
+- [ ] 5.2.6 Implement `cancel()` handler
+  - Call `session.interrupt()`
 
-- [ ] 5.2.7 实现 `set_session_mode()` 处理器
-  - 调用 `session.set_permission_mode()`
+- [ ] 5.2.7 Implement `set_session_mode()` handler
+  - Call `session.set_permission_mode()`
 
-### 5.3 ACP 通知发送
+### 5.3 ACP notification sending
 
-- [ ] 5.3.1 实现 `AcpNotifier` trait
-- [ ] 5.3.2 实现基于 `JrHandlerChain` 的通知发送
+- [ ] 5.3.1 Implement `AcpNotifier` trait
+- [ ] 5.3.2 Implement notification sending via `JrHandlerChain`
 
-### 5.4 Agent Runner
+### 5.4 Agent runner
 
-- [ ] 5.4.1 实现 `run_acp()` 函数
-  - 加载环境变量配置
-  - 创建 ClaudeAcpAgent
-  - 构建 JrHandlerChain
-  - 注册所有请求处理器
-  - 启动 ByteStreams 服务
+- [ ] 5.4.1 Implement `run_acp()`
+  - Load env configuration
+  - Create ClaudeAcpAgent
+  - Build JrHandlerChain
+  - Register all request handlers
+  - Start ByteStreams service
 
-### 5.5 集成测试
+### 5.5 Integration tests
 
-- [ ] 5.5.1 initialize 请求测试
-- [ ] 5.5.2 new_session 请求测试（含 meta 字段）
-- [ ] 5.5.3 prompt 请求测试
-- [ ] 5.5.4 cancel 请求测试
-- [ ] 5.5.5 set_mode 请求测试
-
----
-
-## Phase 6: MCP Server 实现 (mcp/)
-
-### 6.1 MCP Server 基础
-
-- [ ] 6.1.1 集成 `rmcp` 库
-- [ ] 6.1.2 实现 `McpServer` 结构
-- [ ] 6.1.3 实现 `McpTool` trait
-
-### 6.2 内置工具实现
-
-- [ ] 6.2.1 实现 `ReadTool`
-  - 输入: `file_path`, `offset`, `limit`
-  - 输出: 文件内容
-
-- [ ] 6.2.2 实现 `WriteTool`
-  - 输入: `file_path`, `content`
-  - 输出: 写入状态
-
-- [ ] 6.2.3 实现 `EditTool`
-  - 输入: `file_path`, `old_string`, `new_string`, `replace_all`
-  - 输出: 编辑结果
-
-- [ ] 6.2.4 实现 `BashTool`
-  - 输入: `command`, `description`, `timeout`
-  - 输出: 命令执行结果
-
-- [ ] 6.2.5 实现 `KillShellTool`
-- [ ] 6.2.6 实现 `BashOutputTool`
-
-### 6.3 工具集成
-
-- [ ] 6.3.1 注册工具到 MCP Server
-- [ ] 6.3.2 实现工具权限检查
-
-### 6.4 单元测试
-
-- [ ] 6.4.1 Read 工具测试
-- [ ] 6.4.2 Write 工具测试
-- [ ] 6.4.3 Edit 工具测试
-- [ ] 6.4.4 Bash 工具测试
+- [ ] 5.5.1 initialize request test
+- [ ] 5.5.2 new_session request test (including meta)
+- [ ] 5.5.3 prompt request test
+- [ ] 5.5.4 cancel request test
+- [ ] 5.5.5 set_mode request test
 
 ---
 
-## Phase 7: 设置管理实现 (settings/)
+## Phase 6: MCP Server implementation (mcp/)
+
+### 6.1 MCP server basics
+
+- [ ] 6.1.1 Integrate `rmcp`
+- [ ] 6.1.2 Implement `McpServer` struct
+- [ ] 6.1.3 Implement `McpTool` trait
+
+### 6.2 Built-in tools
+
+- [ ] 6.2.1 Implement `ReadTool`
+  - Inputs: `file_path`, `offset`, `limit`
+  - Output: file content
+
+- [ ] 6.2.2 Implement `WriteTool`
+  - Inputs: `file_path`, `content`
+  - Output: write status
+
+- [ ] 6.2.3 Implement `EditTool`
+  - Inputs: `file_path`, `old_string`, `new_string`, `replace_all`
+  - Output: edit result
+
+- [ ] 6.2.4 Implement `BashTool`
+  - Inputs: `command`, `description`, `timeout`
+  - Output: command result
+
+- [ ] 6.2.5 Implement `KillShellTool`
+- [ ] 6.2.6 Implement `BashOutputTool`
+
+### 6.3 Tool integration
+
+- [ ] 6.3.1 Register tools with the MCP server
+- [ ] 6.3.2 Implement tool permission checks
+
+### 6.4 Unit tests
+
+- [ ] 6.4.1 Read tool tests
+- [ ] 6.4.2 Write tool tests
+- [ ] 6.4.3 Edit tool tests
+- [ ] 6.4.4 Bash tool tests
+
+---
+
+## Phase 7: Settings management implementation (settings/)
 
 ### 7.1 SettingsManager
 
-- [ ] 7.1.1 实现 `SettingsManager` 结构
-- [ ] 7.1.2 实现设置文件加载
+- [ ] 7.1.1 Implement `SettingsManager` struct
+- [ ] 7.1.2 Implement settings file loading
   - User settings: `~/.claude/settings.json`
   - Project settings: `.claude/settings.json`
   - Local settings: `.claude/settings.local.json`
 
-- [ ] 7.1.3 实现设置合并逻辑（优先级: Local > Project > User）
+- [ ] 7.1.3 Implement settings merging logic (priority: Local > Project > User)
 
 ---
 
-## Phase 8: 测试、文档与发布
+## Phase 8: Testing, documentation, and release
 
-### 8.1 单元测试完善
+### 8.1 Unit test improvements
 
-- [ ] 8.1.1 达到核心模块 80% 测试覆盖率
-- [ ] 8.1.2 添加边界条件测试
-- [ ] 8.1.3 添加错误处理测试
+- [ ] 8.1.1 Reach 80% coverage for core modules
+- [ ] 8.1.2 Add boundary-condition tests
+- [ ] 8.1.3 Add error-handling tests
 
-### 8.2 集成测试
+### 8.2 Integration tests
 
-- [ ] 8.2.1 完整会话流程测试
-- [ ] 8.2.2 多会话并发测试
-- [ ] 8.2.3 权限请求/响应测试
-- [ ] 8.2.4 Token 用量统计测试
-- [ ] 8.2.5 Meta 字段端到端测试
+- [ ] 8.2.1 Full session flow test
+- [ ] 8.2.2 Multi-session concurrency tests
+- [ ] 8.2.3 Permission request/response tests
+- [ ] 8.2.4 Token usage accounting tests
+- [ ] 8.2.5 Meta fields end-to-end tests
 
-### 8.3 E2E 测试
+### 8.3 E2E tests
 
-- [ ] 8.3.1 与 Zed 编辑器集成测试
-- [ ] 8.3.2 环境变量配置测试
-- [ ] 8.3.3 错误恢复测试
-- [ ] 8.3.4 会话恢复测试（resume）
+- [ ] 8.3.1 Integration tests with Zed
+- [ ] 8.3.2 Env var configuration tests
+- [ ] 8.3.3 Error recovery tests
+- [ ] 8.3.4 Session resume tests
 
-### 8.4 文档
+### 8.4 Documentation
 
-- [ ] 8.4.1 API 文档 (rustdoc)
-- [ ] 8.4.2 README.md 使用说明
-- [ ] 8.4.3 环境变量配置说明
-- [ ] 8.4.4 Meta 字段使用说明
+- [ ] 8.4.1 API documentation (rustdoc)
+- [ ] 8.4.2 README.md usage guide
+- [ ] 8.4.3 Environment variable configuration guide
+- [ ] 8.4.4 Meta fields guide
 - [ ] 8.4.5 CHANGELOG.md
 
-### 8.5 发布准备
+### 8.5 Release preparation
 
-- [ ] 8.5.1 更新 Cargo.toml 版本号
-- [ ] 8.5.2 检查依赖是否可发布（vendors → crates.io/git）
-- [ ] 8.5.3 运行 `cargo publish --dry-run`
-- [ ] 8.5.4 正式发布 `cargo publish`
+- [ ] 8.5.1 Update Cargo.toml version
+- [ ] 8.5.2 Ensure dependencies are publishable (vendors → crates.io/git)
+- [ ] 8.5.3 Run `cargo publish --dry-run`
+- [ ] 8.5.4 Publish with `cargo publish`
 
 ---
 
-## 里程碑
+## Milestones
 
-### M1: 项目骨架完成
-- Phase 1 完成
-- 所有模块能够编译
-- 依赖关系正确
+### M1: Scaffolding complete
+- Phase 1 complete
+- All modules compile
+- Dependencies are correct
 
-### M2: 核心类型就绪
-- Phase 2 完成
-- types/ 所有类型可用（含 Meta 类型）
-- 单元测试通过
+### M2: Core types ready
+- Phase 2 complete
+- All types in types/ are available (including Meta types)
+- Unit tests pass
 
-### M3: 消息转换可用
-- Phase 3 完成
-- ACP ↔ SDK 消息转换正常工作
-- 单元测试通过
+### M3: Message conversion working
+- Phase 3 complete
+- ACP ↔ SDK message conversion works
+- Unit tests pass
 
-### M4: 会话管理可用
-- Phase 4 完成
-- Session 创建、查询、销毁正常
-- 权限处理正常
-- Token 统计正常
-- Meta 字段解析正常
+### M4: Session management working
+- Phase 4 complete
+- Session create/query/destroy works
+- Permission handling works
+- Token usage accounting works
+- Meta parsing works
 
 ### M5: Agent MVP
-- Phase 5 完成
-- 基础 ACP 协议支持
-- 可以与编辑器进行基本交互
-- 支持 systemPrompt 和 resume 功能
+- Phase 5 complete
+- Basic ACP protocol support
+- Can do basic editor interactions
+- Supports systemPrompt and resume
 
-### M6: 功能完整
-- Phase 6, 7 完成
-- MCP 内置工具可用
-- 设置管理可用
+### M6: Feature complete
+- Phases 6 and 7 complete
+- MCP built-in tools available
+- Settings management available
 
-### M7: 发布就绪
-- Phase 8 完成
-- 测试覆盖率达标
-- 文档完善
-- 成功发布到 crates.io
+### M7: Release-ready
+- Phase 8 complete
+- Test coverage meets target
+- Documentation complete
+- Successfully published to crates.io
 
 ---
 
-## 依赖关系图
+## Dependency graph
 
 ```mermaid
 graph TD
-    P1[Phase 1: 骨架] --> P2[Phase 2: types/]
+    P1[Phase 1: Scaffolding] --> P2[Phase 2: types/]
     P2 --> P3[Phase 3: converter/]
     P2 --> P4[Phase 4: session/]
     P3 --> P4
@@ -521,43 +521,43 @@ graph TD
     P2 --> P6[Phase 6: mcp/]
     P4 --> P6
     P2 --> P7[Phase 7: settings/]
-    P5 --> P8[Phase 8: 测试发布]
+    P5 --> P8[Phase 8: Testing & Release]
     P6 --> P8
     P7 --> P8
 ```
 
 ---
 
-## 风险与缓解
+## Risks and mitigations
 
-### 风险 1: SDK 兼容性
-- **描述**: claude-agent-sdk-rs 版本更新可能破坏兼容性
-- **缓解**: 使用 git submodule 固定版本，定期检查更新
+### Risk 1: SDK compatibility
+- **Description**: `claude-agent-sdk-rs` updates may introduce breaking changes
+- **Mitigation**: Pin versions via git submodules; review updates regularly
 
-### 风险 2: ACP 协议变更
-- **描述**: ACP 协议可能有 breaking changes
-- **缓解**: 关注 agent-client-protocol 仓库更新，保持协议同步
+### Risk 2: ACP protocol changes
+- **Description**: ACP may introduce breaking changes
+- **Mitigation**: Track updates in the agent-client-protocol repo and keep in sync
 
-### 风险 3: 并发问题
-- **描述**: DashMap 使用不当可能导致死锁
-- **缓解**: 使用 entry API，避免嵌套锁
+### Risk 3: Concurrency issues
+- **Description**: Incorrect DashMap usage can lead to deadlocks
+- **Mitigation**: Use entry APIs and avoid nested locking
 
-### 风险 4: 环境变量安全
-- **描述**: AUTH_TOKEN 等敏感信息泄露
-- **缓解**: 不在日志中打印敏感信息
+### Risk 4: Environment variable safety
+- **Description**: Leakage of sensitive info like AUTH_TOKEN
+- **Mitigation**: Never log sensitive values
 
-### 风险 5: crates.io 发布依赖
-- **描述**: vendors 目录下的依赖无法直接用于 crates.io 发布
-- **缓解**: 发布时切换为 git 依赖或等待上游发布到 crates.io
+### Risk 5: crates.io publish dependencies
+- **Description**: `vendors/` dependencies cannot be used directly when publishing to crates.io
+- **Mitigation**: Switch to crates.io or git dependencies before release (or wait for upstream releases)
 
 ---
 
-## 附录
+## Appendix
 
-### A. 开发环境要求
+### A. Development environment requirements
 
 - Rust: nightly (for edition 2024)
-- 依赖:
+- Dependencies:
   - tokio
   - serde / serde_json
   - dashmap
@@ -567,56 +567,58 @@ graph TD
   - futures
   - rmcp
 
-### B. 测试命令
+### B. Test commands
 
 ```bash
-# 运行所有测试
+# Run all tests
 cargo test
 
-# 运行特定模块测试
+# Run module-specific tests
 cargo test types::
 cargo test session::
 cargo test agent::
 
-# 运行集成测试
+# Run integration tests
 cargo test --test integration
 
-# 检查代码风格
+# Lint/style checks
 cargo clippy
 cargo fmt --check
 ```
 
-### C. 构建命令
+### C. Build commands
 
 ```bash
-# Debug 构建
+# Debug build
 cargo build
 
-# Release 构建
+# Release build
 cargo build --release
 
-# 安装到系统
+# Install locally
 cargo install --path .
 
-# 发布到 crates.io
+# Publish to crates.io
 cargo publish --dry-run
 cargo publish
 ```
 
-### D. Meta 字段示例
+### D. Meta field examples
 
-**systemPrompt 追加**:
+**Append systemPrompt**:
+
 ```json
 {
   "_meta": {
     "systemPrompt": {
-      "append": "请用中文回复"
+      "append": "Please respond in English"
     }
   }
 }
 ```
 
-**恢复会话**:
+**Resume session**:
+
 ```json
 {
   "_meta": {
@@ -629,12 +631,13 @@ cargo publish
 }
 ```
 
-**组合使用**:
+**Combined**:
+
 ```json
 {
   "_meta": {
     "systemPrompt": {
-      "append": "请用中文回复"
+      "append": "Please respond in English"
     },
     "claudeCode": {
       "options": {

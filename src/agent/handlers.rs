@@ -13,14 +13,14 @@ use std::time::Instant;
 use futures::{Stream, StreamExt};
 use sacp::JrConnectionCx;
 use sacp::link::AgentToClient;
-use tokio_util::sync::CancellationToken;
 use sacp::schema::{
-    AgentCapabilities, ContentBlock, CurrentModeUpdate, Implementation,
-    InitializeRequest, InitializeResponse, LoadSessionRequest, LoadSessionResponse,
-    NewSessionRequest, NewSessionResponse, PromptCapabilities, PromptRequest, PromptResponse,
-    SessionId, SessionMode, SessionModeId, SessionModeState, SessionNotification, SessionUpdate,
-    SetSessionModeRequest, SetSessionModeResponse, StopReason,
+    AgentCapabilities, ContentBlock, CurrentModeUpdate, Implementation, InitializeRequest,
+    InitializeResponse, LoadSessionRequest, LoadSessionResponse, NewSessionRequest,
+    NewSessionResponse, PromptCapabilities, PromptRequest, PromptResponse, SessionId, SessionMode,
+    SessionModeId, SessionModeState, SessionNotification, SessionUpdate, SetSessionModeRequest,
+    SetSessionModeResponse, StopReason,
 };
+use tokio_util::sync::CancellationToken;
 
 // Unstable types from agent-client-protocol-schema
 use agent_client_protocol_schema::{ModelInfo, SessionModelState};
@@ -159,7 +159,7 @@ pub async fn handle_new_session(
     // Send available commands list to client
     // This is done asynchronously (similar to TypeScript's setTimeout)
     // to ensure the response is sent first
-    #[cfg(not(test))]  // Only in production, skip in tests
+    #[cfg(not(test))] // Only in production, skip in tests
     {
         let session_id_clone = session_id.clone();
         tokio::spawn(async move {
@@ -294,8 +294,10 @@ fn build_available_models(config: &AgentConfig) -> SessionModelState {
     let display_name = current_model_id.clone();
 
     // Build available models list with the current model
-    let available_models = vec![ModelInfo::new(current_model_id.clone(), display_name)
-        .description(format!("Current model: {}", current_model_id))];
+    let available_models = vec![
+        ModelInfo::new(current_model_id.clone(), display_name)
+            .description(format!("Current model: {}", current_model_id)),
+    ];
 
     SessionModelState::new(current_model_id, available_models)
 }
@@ -467,7 +469,10 @@ pub async fn handle_prompt(
         if !query_text.is_empty() {
             // Transform MCP command format: /mcp:server:cmd -> /server:cmd (MCP)
             let transformed_query = transform_mcp_command_input(&query_text);
-            client.query(&transformed_query).await.map_err(AgentError::from)?;
+            client
+                .query(&transformed_query)
+                .await
+                .map_err(AgentError::from)?;
         }
     }
     let query_elapsed = query_start.elapsed();
@@ -521,7 +526,7 @@ pub async fn handle_prompt(
 
                 // KEY FIX: Synchronous drain - wait until queue is fully empty (50ms silence)
                 // This prevents old messages from leaking into the next prompt
-                drain_messages_synchronously(&session_id, &request_id, &mut stream).await;
+                drain_messages_synchronously(session_id, &request_id, &mut stream).await;
 
                 tracing::info!(
                     session_id = %session_id,
@@ -558,7 +563,7 @@ pub async fn handle_prompt(
                 session.cancel().await;
 
                 // Same synchronous drain for lagged cancel
-                drain_messages_synchronously(&session_id, &request_id, &mut stream).await;
+                drain_messages_synchronously(session_id, &request_id, &mut stream).await;
 
                 tracing::info!(
                     session_id = %session_id,
@@ -983,9 +988,19 @@ fn extract_text_from_content(blocks: &[ContentBlock]) -> String {
 /// This function is kept for reference/debugging purposes only.
 #[allow(dead_code)]
 async fn drain_leftover_messages(
-    stream: &mut Pin<Box<dyn Stream<Item = Result<claude_code_agent_sdk::Message, claude_code_agent_sdk::ClaudeError>> + Send + '_>>,
+    stream: &mut Pin<
+        Box<
+            dyn Stream<
+                    Item = Result<
+                        claude_code_agent_sdk::Message,
+                        claude_code_agent_sdk::ClaudeError,
+                    >,
+                > + Send
+                + '_,
+        >,
+    >,
 ) {
-    use tokio::time::{timeout, Duration};
+    use tokio::time::{Duration, timeout};
 
     let mut drained_count = 0;
     let max_drain_time = Duration::from_millis(100);
@@ -998,7 +1013,10 @@ async fn drain_leftover_messages(
                 drained_count += 1;
                 // Log the drained message type for debugging
                 tracing::debug!(
-                    drained_message_type = format!("{:?}", message).chars().take(50).collect::<String>(),
+                    drained_message_type = format!("{:?}", message)
+                        .chars()
+                        .take(50)
+                        .collect::<String>(),
                     "Drained leftover message from previous prompt"
                 );
             }
@@ -1043,9 +1061,19 @@ async fn drain_leftover_messages(
 async fn drain_messages_synchronously(
     session_id: &str,
     request_id: &str,
-    stream: &mut Pin<Box<dyn Stream<Item = Result<claude_code_agent_sdk::Message, claude_code_agent_sdk::ClaudeError>> + Send + '_>>,
+    stream: &mut Pin<
+        Box<
+            dyn Stream<
+                    Item = Result<
+                        claude_code_agent_sdk::Message,
+                        claude_code_agent_sdk::ClaudeError,
+                    >,
+                > + Send
+                + '_,
+        >,
+    >,
 ) {
-    use tokio::time::{timeout, Duration};
+    use tokio::time::{Duration, timeout};
 
     let drain_start = Instant::now();
     let mut drained_count = 0;
@@ -1106,7 +1134,8 @@ async fn drain_messages_synchronously(
             Err(_) => {
                 // Timeout - check if we've had enough silence
                 // Use saturating_sub to prevent theoretical underflow
-                let time_since_last_message = drain_start.elapsed().saturating_sub(last_message_time);
+                let time_since_last_message =
+                    drain_start.elapsed().saturating_sub(last_message_time);
                 if time_since_last_message >= silence_duration {
                     tracing::info!(
                         session_id = %session_id,
@@ -1145,10 +1174,10 @@ async fn drain_messages_synchronously(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use futures::stream;
     use sacp::schema::{ProtocolVersion, TextContent};
     use serial_test::serial;
     use std::time::Duration;
-    use futures::stream;
 
     #[test]
     fn test_handle_initialize() {
@@ -1217,8 +1246,9 @@ mod tests {
             })),
         ];
 
-        let mut stream: Pin<Box<dyn Stream<Item = Result<Message, claude_code_agent_sdk::ClaudeError>> + Send + '_>> =
-            Box::pin(stream::iter(messages));
+        let mut stream: Pin<
+            Box<dyn Stream<Item = Result<Message, claude_code_agent_sdk::ClaudeError>> + Send + '_>,
+        > = Box::pin(stream::iter(messages));
 
         // The drain should complete quickly since the stream ends after 3 messages
         drain_messages_synchronously(session_id, request_id, &mut stream).await;
@@ -1237,8 +1267,9 @@ mod tests {
         let request_id = "test-request";
 
         // Create an empty stream
-        let mut stream: Pin<Box<dyn Stream<Item = Result<Message, claude_code_agent_sdk::ClaudeError>> + Send + '_>> =
-            Box::pin(stream::empty());
+        let mut stream: Pin<
+            Box<dyn Stream<Item = Result<Message, claude_code_agent_sdk::ClaudeError>> + Send + '_>,
+        > = Box::pin(stream::empty());
 
         // The drain should complete immediately for an empty stream
         drain_messages_synchronously(session_id, request_id, &mut stream).await;
@@ -1266,8 +1297,9 @@ mod tests {
             }))
         });
 
-        let mut stream: Pin<Box<dyn Stream<Item = Result<Message, claude_code_agent_sdk::ClaudeError>> + Send + '_>> =
-            Box::pin(stream::iter(messages));
+        let mut stream: Pin<
+            Box<dyn Stream<Item = Result<Message, claude_code_agent_sdk::ClaudeError>> + Send + '_>,
+        > = Box::pin(stream::iter(messages));
 
         // The drain should complete within a reasonable time
         // Even with 50 messages, it should finish quickly (stream ends after yielding all)
@@ -1276,7 +1308,10 @@ mod tests {
         let elapsed = start.elapsed();
 
         // Should complete in under 1 second (much faster than the 5s max timeout)
-        assert!(elapsed < Duration::from_secs(1), "Drain should complete quickly");
+        assert!(
+            elapsed < Duration::from_secs(1),
+            "Drain should complete quickly"
+        );
     }
 
     /// Test that drain_messages_synchronously correctly detects silence period
@@ -1313,8 +1348,9 @@ mod tests {
             })),
         ];
 
-        let mut stream: Pin<Box<dyn Stream<Item = Result<Message, claude_code_agent_sdk::ClaudeError>> + Send + '_>> =
-            Box::pin(stream::iter(messages));
+        let mut stream: Pin<
+            Box<dyn Stream<Item = Result<Message, claude_code_agent_sdk::ClaudeError>> + Send + '_>,
+        > = Box::pin(stream::iter(messages));
 
         // The drain should complete after the stream ends
         let start = std::time::Instant::now();
@@ -1322,7 +1358,10 @@ mod tests {
         let elapsed = start.elapsed();
 
         // Should complete very quickly (stream ends immediately after 3 messages)
-        assert!(elapsed < Duration::from_millis(100), "Drain should detect stream end quickly");
+        assert!(
+            elapsed < Duration::from_millis(100),
+            "Drain should detect stream end quickly"
+        );
     }
 
     /// Test build_available_models function with config model
@@ -1339,7 +1378,10 @@ mod tests {
         assert_eq!(model_state.available_models[0].model_id.0, "glm-4.7".into());
         assert_eq!(model_state.available_models[0].name, "glm-4.7");
         assert_eq!(
-            model_state.available_models[0].description.as_ref().unwrap(),
+            model_state.available_models[0]
+                .description
+                .as_ref()
+                .unwrap(),
             "Current model: glm-4.7"
         );
     }

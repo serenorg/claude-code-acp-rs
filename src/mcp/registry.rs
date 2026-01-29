@@ -259,10 +259,10 @@ impl ToolRegistry {
         }
 
         // Try stripping ACP prefix
-        if let Some(stripped) = name.strip_prefix(ACP_TOOL_PREFIX) {
-            if let Some(tool) = self.tools.get(stripped) {
-                return Some(tool.clone());
-            }
+        if let Some(stripped) = name.strip_prefix(ACP_TOOL_PREFIX)
+            && let Some(tool) = self.tools.get(stripped)
+        {
+            return Some(tool.clone());
         }
 
         None

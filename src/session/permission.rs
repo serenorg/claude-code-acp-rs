@@ -264,12 +264,12 @@ impl PermissionHandler {
         let strategy_result = self.strategy.check_permission(tool_name, tool_input);
 
         // Special handling for DontAsk mode: convert NeedsPermission to Blocked
-        if self.mode == PermissionMode::DontAsk {
-            if strategy_result == ToolPermissionResult::NeedsPermission {
-                return ToolPermissionResult::Blocked {
-                    reason: "Tool not pre-approved by settings rules in DontAsk mode".to_string(),
-                };
-            }
+        if self.mode == PermissionMode::DontAsk
+            && strategy_result == ToolPermissionResult::NeedsPermission
+        {
+            return ToolPermissionResult::Blocked {
+                reason: "Tool not pre-approved by settings rules in DontAsk mode".to_string(),
+            };
         }
 
         // User interaction tools should always be allowed
@@ -420,7 +420,10 @@ mod tests {
         let handler = PermissionHandler::with_mode(PermissionMode::Plan);
 
         match handler
-            .check_permission("Write", &json!({"file_path": "/tmp/test.txt", "content": "test"}))
+            .check_permission(
+                "Write",
+                &json!({"file_path": "/tmp/test.txt", "content": "test"}),
+            )
             .await
         {
             ToolPermissionResult::Blocked { .. } => {}

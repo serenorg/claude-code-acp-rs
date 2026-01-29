@@ -54,11 +54,11 @@ impl HookCallbackRegistry {
         tool_input: serde_json::Value,
         tool_response: serde_json::Value,
     ) -> bool {
-        if let Some((_, callbacks)) = self.callbacks.remove(tool_use_id) {
-            if let Some(callback) = callbacks.on_post_tool_use {
-                callback(tool_use_id.to_string(), tool_input, tool_response).await;
-                return true;
-            }
+        if let Some((_, callbacks)) = self.callbacks.remove(tool_use_id)
+            && let Some(callback) = callbacks.on_post_tool_use
+        {
+            callback(tool_use_id.to_string(), tool_input, tool_response).await;
+            return true;
         }
         false
     }

@@ -16,15 +16,15 @@ use sacp::{
     JrConnectionCx,
     link::AgentToClient,
     schema::{
-        SessionId, SessionNotification, SessionUpdate, ToolCallId, ToolCallStatus,
-        ToolCallUpdate, ToolCallUpdateFields, ToolCallContent,
+        SessionId, SessionNotification, SessionUpdate, ToolCallContent, ToolCallId, ToolCallStatus,
+        ToolCallUpdate, ToolCallUpdateFields,
     },
 };
 use tokio::sync::RwLock;
 use tracing::Instrument;
 
 use crate::command_safety::{command_might_be_dangerous, is_known_safe_command};
-use crate::session::{PermissionMode, PermissionHandler};
+use crate::session::{PermissionHandler, PermissionMode};
 use crate::settings::PermissionChecker;
 use crate::utils::is_plans_directory_path;
 
@@ -229,8 +229,8 @@ pub fn create_pre_tool_use_hook(
                         }
 
                         // Check Bash commands for known safe commands (auto-allow)
-                        if stripped_tool_name == "Bash" {
-                            if let Some(cmd) = tool_input.get("command").and_then(|v| v.as_str()) {
+                        if stripped_tool_name == "Bash"
+                            && let Some(cmd) = tool_input.get("command").and_then(|v| v.as_str()) {
                                 // Check if this is a known safe command
                                 if is_known_safe_command(cmd) {
                                     let elapsed = start_time.elapsed();
@@ -269,7 +269,6 @@ pub fn create_pre_tool_use_hook(
                                     // Continue to normal permission flow - user will be asked
                                 }
                             }
-                        }
                     }
 
                     // Plan mode: Block write operations EXCEPT for plan files
@@ -378,9 +377,9 @@ pub fn create_pre_tool_use_hook(
                         "Permission check completed"
                     );
 
-                    // 根据权限决策返回相应的 Hook 输出
-                    // SDK 已修改为在 mcp_message 处理中调用 can_use_tool 回调，
-                    // 因此 Ask 决策会由 SDK 层处理，Hook 只需要返回 continue_: true
+                    // Return the appropriate hook output based on the permission decision.
+                    // Note: The SDK now calls `can_use_tool` from the MCP message handler,
+                    // so `Ask` decisions are handled by the SDK layer; the hook just returns continue_: true.
                     match permission_check.decision {
                         crate::settings::PermissionDecision::Allow => {
                             tracing::debug!(
@@ -525,10 +524,7 @@ fn send_denied_tool_result(
         .raw_output(raw_output);
 
     let update = ToolCallUpdate::new(tool_call_id, update_fields);
-    let notification = SessionNotification::new(
-        session_id,
-        SessionUpdate::ToolCallUpdate(update),
-    );
+    let notification = SessionNotification::new(session_id, SessionUpdate::ToolCallUpdate(update));
 
     // Send the notification synchronously
     // Note: send_notification uses unbounded_send which is non-blocking
@@ -576,13 +572,7 @@ fn create_deny_response(
     // Send tool_result notification to client so Zed doesn't show "Tool call not found"
     // Note: send_notification is non-blocking (uses unbounded_send)
     if let Some(tuid) = tool_use_id {
-        send_denied_tool_result(
-            connection_cx_lock,
-            session_id,
-            tuid,
-            tool_name,
-            &reason,
-        );
+        send_denied_tool_result(connection_cx_lock, session_id, tuid, tool_name, &reason);
     }
 
     HookJsonOutput::Sync(SyncHookJsonOutput {
@@ -1051,7 +1041,7 @@ mod tests {
             cwd: "/tmp".to_string(),
             permission_mode: None,
             tool_name: "Bash".to_string(),
-            tool_input: json!({"command": "mkdir new_dir"}),  // mkdir is not a safe command
+            tool_input: json!({"command": "mkdir new_dir"}), // mkdir is not a safe command
         });
 
         let result = hook(input, None, HookContext::default()).await;
@@ -1118,7 +1108,10 @@ mod tests {
         // Test with empty tool_name - should not panic and should use fallback
         let empty_tool_name = "";
         let result = format!("Tool {} denied", empty_tool_name);
-        assert!(result.contains("Tool  denied"), "Empty tool_name produces double space");
+        assert!(
+            result.contains("Tool  denied"),
+            "Empty tool_name produces double space"
+        );
 
         // Test the fallback logic
         let display_name = if empty_tool_name.is_empty() {
@@ -1164,7 +1157,8 @@ mod tests {
         match result {
             HookJsonOutput::Sync(output) => {
                 // Should allow (not deny) plan file writes
-                if let Some(HookSpecificOutput::PreToolUse(specific)) = output.hook_specific_output {
+                if let Some(HookSpecificOutput::PreToolUse(specific)) = output.hook_specific_output
+                {
                     assert_ne!(specific.permission_decision, Some("deny".to_string()));
                 }
             }
@@ -1195,9 +1189,16 @@ mod tests {
         match result {
             HookJsonOutput::Sync(output) => {
                 assert_eq!(output.continue_, Some(true));
-                if let Some(HookSpecificOutput::PreToolUse(specific)) = output.hook_specific_output {
+                if let Some(HookSpecificOutput::PreToolUse(specific)) = output.hook_specific_output
+                {
                     assert_eq!(specific.permission_decision, Some("deny".to_string()));
-                    assert!(specific.permission_decision_reason.as_ref().unwrap().contains("Plan mode"));
+                    assert!(
+                        specific
+                            .permission_decision_reason
+                            .as_ref()
+                            .unwrap()
+                            .contains("Plan mode")
+                    );
                 }
             }
             HookJsonOutput::Async(_) => panic!("Expected sync output"),
@@ -1228,7 +1229,8 @@ mod tests {
         match result {
             HookJsonOutput::Sync(output) => {
                 assert_eq!(output.continue_, Some(true));
-                if let Some(HookSpecificOutput::PreToolUse(specific)) = output.hook_specific_output {
+                if let Some(HookSpecificOutput::PreToolUse(specific)) = output.hook_specific_output
+                {
                     assert_eq!(specific.permission_decision, Some("deny".to_string()));
                 }
             }
@@ -1255,7 +1257,8 @@ mod tests {
 
         match result {
             HookJsonOutput::Sync(output) => {
-                if let Some(HookSpecificOutput::PreToolUse(specific)) = output.hook_specific_output {
+                if let Some(HookSpecificOutput::PreToolUse(specific)) = output.hook_specific_output
+                {
                     assert_eq!(specific.permission_decision, Some("allow".to_string()));
                 }
             }
@@ -1308,7 +1311,8 @@ mod tests {
             HookJsonOutput::Sync(output) => {
                 assert_eq!(output.continue_, Some(true));
                 // Should not deny
-                if let Some(HookSpecificOutput::PreToolUse(specific)) = output.hook_specific_output {
+                if let Some(HookSpecificOutput::PreToolUse(specific)) = output.hook_specific_output
+                {
                     assert_ne!(specific.permission_decision, Some("deny".to_string()));
                 }
             }

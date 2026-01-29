@@ -348,10 +348,10 @@ impl SettingsManager {
     /// Check if a tool is allowed
     pub fn is_tool_allowed(&self, tool_name: &str) -> bool {
         // If denied_tools is set and contains the tool, deny it
-        if let Some(ref denied) = self.settings.denied_tools {
-            if denied.iter().any(|t| t == tool_name) {
-                return false;
-            }
+        if let Some(ref denied) = self.settings.denied_tools
+            && denied.iter().any(|t| t == tool_name)
+        {
+            return false;
         }
 
         // If allowed_tools is set, check if tool is in the list

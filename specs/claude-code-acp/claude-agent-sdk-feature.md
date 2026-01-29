@@ -1,109 +1,109 @@
-# Claude Agent SDK for Rust 功能清单
+# Claude Agent SDK for Rust Feature List
 
-基于 `vendors/claude-agent-sdk-rs` 项目分析，本文档列出该 SDK 支持的所有功能。
+Based on analysis of the `vendors/claude-agent-sdk-rs` project, this document lists the features supported by the SDK.
 
-**SDK 信息**:
-- 版本: 0.5.0
+**SDK info**:
+- Version: 0.5.0
 - Edition: 2024
-- Rust 最低版本: 1.90
-- 特性: 100% 与 Python SDK 功能对等
+- Minimum Rust version: 1.90
+- Goal: 100% feature parity with the Python SDK
 
 ---
 
-## 1. 项目结构
+## 1. Project layout
 
 ```
 vendors/claude-agent-sdk-rs/src/
-├── lib.rs              # 主库入口，公共 API 导出
-├── client.rs           # ClaudeClient 双向流式客户端
-├── query.rs            # 简单查询 API 函数
-├── errors.rs           # 错误类型定义
-├── version.rs          # 版本和兼容性检查
-├── types/              # 类型定义
-│   ├── config.rs       # 配置选项
-│   ├── messages.rs     # 消息类型
-│   ├── hooks.rs        # 钩子系统
-│   ├── permissions.rs  # 权限管理
-│   ├── mcp.rs          # MCP 协议支持
-│   └── plugin.rs       # 插件配置
-└── internal/           # 内部实现
-    ├── client.rs       # 内部客户端实现
-    ├── query_full.rs   # 完整查询和双向控制
-    ├── message_parser.rs # 消息解析
-    └── transport/      # 传输层
-        ├── trait_def.rs # Transport trait
-        └── subprocess.rs # 子进程传输实现
+├── lib.rs                # main library entry, public API exports
+├── client.rs             # ClaudeClient bidirectional streaming client
+├── query.rs              # simple query helpers
+├── errors.rs             # error types
+├── version.rs            # version + compatibility checks
+├── types/                # public types
+│   ├── config.rs         # configuration options
+│   ├── messages.rs       # message types
+│   ├── hooks.rs          # hook system
+│   ├── permissions.rs    # permission management
+│   ├── mcp.rs            # MCP protocol support
+│   └── plugin.rs         # plugin configuration
+└── internal/             # internal implementation
+    ├── client.rs         # internal client
+    ├── query_full.rs     # full query + bidirectional control
+    ├── message_parser.rs # message parsing
+    └── transport/        # transport layer
+        ├── trait_def.rs  # Transport trait
+        └── subprocess.rs # subprocess transport
 ```
 
 ---
 
-## 2. 核心客户端
+## 2. Core client
 
 ### 2.1 ClaudeClient
 
-| 功能 | 方法 | 描述 | 源文件位置 |
-|------|------|------|------------|
-| 创建客户端 | `ClaudeClient::new()` | 创建新客户端实例 | client.rs |
-| 带验证创建 | `ClaudeClient::try_new()` | 创建并进行早期验证 | client.rs |
-| 连接 | `connect()` | 连接到 Claude CLI | client.rs |
-| 断开连接 | `disconnect()` | 断开与 CLI 的连接 | client.rs |
-| 简单查询 | `query()` | 发送文本查询 | client.rs |
-| 带会话查询 | `query_with_session()` | 使用指定会话 ID 查询 | client.rs |
-| 内容查询 | `query_with_content()` | 发送多模态内容 | client.rs |
-| 内容+会话查询 | `query_with_content_and_session()` | 多模态内容+会话 | client.rs |
-| 新会话 | `new_session()` | 创建新会话 | client.rs |
-| 接收消息流 | `receive_messages()` | 持续接收所有消息 | client.rs |
-| 接收响应 | `receive_response()` | 接收直到 ResultMessage | client.rs |
-| 中断 | `interrupt()` | 中断当前操作 | client.rs |
-| 设置权限模式 | `set_permission_mode()` | 动态改变权限模式 | client.rs |
-| 设置模型 | `set_model()` | 动态切换模型 | client.rs |
-| 回退文件 | `rewind_files()` | 回退文件到指定消息状态 | client.rs |
-| 获取服务器信息 | `get_server_info()` | 获取服务器初始化信息 | client.rs |
+| Feature | Method | Description | Source |
+|--------|--------|-------------|--------|
+| Create client | `ClaudeClient::new()` | Create a new client instance | client.rs |
+| Create with validation | `ClaudeClient::try_new()` | Create and perform early validation | client.rs |
+| Connect | `connect()` | Connect to the Claude CLI | client.rs |
+| Disconnect | `disconnect()` | Disconnect from the CLI | client.rs |
+| Simple query | `query()` | Send a text query | client.rs |
+| Query with session | `query_with_session()` | Query with a specified session ID | client.rs |
+| Query with content | `query_with_content()` | Send multimodal content | client.rs |
+| Content + session query | `query_with_content_and_session()` | Multimodal content + session | client.rs |
+| New session | `new_session()` | Create a new session | client.rs |
+| Receive message stream | `receive_messages()` | Continuously receive all messages | client.rs |
+| Receive response | `receive_response()` | Receive until a ResultMessage | client.rs |
+| Interrupt | `interrupt()` | Interrupt the current operation | client.rs |
+| Set permission mode | `set_permission_mode()` | Change permission mode dynamically | client.rs |
+| Set model | `set_model()` | Switch models dynamically | client.rs |
+| Rewind files | `rewind_files()` | Rewind files to a specific message state | client.rs |
+| Get server info | `get_server_info()` | Get server init information | client.rs |
 
-### 2.2 简单查询 API
+### 2.2 Simple query API
 
-| 功能 | 函数 | 返回类型 | 源文件位置 |
-|------|------|---------|------------|
-| 基础查询 | `query()` | `Vec<Message>` | query.rs |
-| 流式查询 | `query_stream()` | `Stream<Result<Message>>` | query.rs |
-| 内容查询 | `query_with_content()` | `Vec<Message>` | query.rs |
-| 流式内容查询 | `query_stream_with_content()` | `Stream<Result<Message>>` | query.rs |
+| Feature | Function | Return type | Source |
+|--------|----------|------------|--------|
+| Basic query | `query()` | `Vec<Message>` | query.rs |
+| Streaming query | `query_stream()` | `Stream<Result<Message>>` | query.rs |
+| Content query | `query_with_content()` | `Vec<Message>` | query.rs |
+| Streaming content query | `query_stream_with_content()` | `Stream<Result<Message>>` | query.rs |
 
 ---
 
-## 3. 消息类型
+## 3. Message types
 
-### 3.1 顶级消息枚举
+### 3.1 Top-level message enum
 
-| 类型 | 描述 | 源文件位置 |
-|------|------|------------|
-| `Message::Assistant` | Claude 的回复 | types/messages.rs |
-| `Message::User` | 用户消息 | types/messages.rs |
-| `Message::System` | 系统消息 | types/messages.rs |
-| `Message::Result` | 查询完成结果 | types/messages.rs |
-| `Message::StreamEvent` | 流式事件 | types/messages.rs |
+| Type | Description | Source |
+|------|-------------|--------|
+| `Message::Assistant` | Claude response | types/messages.rs |
+| `Message::User` | User message | types/messages.rs |
+| `Message::System` | System message | types/messages.rs |
+| `Message::Result` | Query completion result | types/messages.rs |
+| `Message::StreamEvent` | Streaming events | types/messages.rs |
 
-### 3.2 内容块类型
+### 3.2 Content block types
 
-| 类型 | 描述 | 字段 | 源文件位置 |
-|------|------|------|------------|
-| `ContentBlock::Text` | 文本块 | `text: String` | types/messages.rs |
-| `ContentBlock::Thinking` | 思维块（扩展思维） | `thinking: String, signature: String` | types/messages.rs |
-| `ContentBlock::ToolUse` | 工具调用块 | `id, name, input` | types/messages.rs |
-| `ContentBlock::ToolResult` | 工具结果块 | `tool_use_id, content, is_error` | types/messages.rs |
-| `ContentBlock::Image` | 图像块 | `source: ImageSource` | types/messages.rs |
+| Type | Description | Fields | Source |
+|------|-------------|--------|--------|
+| `ContentBlock::Text` | Text block | `text: String` | types/messages.rs |
+| `ContentBlock::Thinking` | Thinking block (extended thinking) | `thinking: String, signature: String` | types/messages.rs |
+| `ContentBlock::ToolUse` | Tool invocation block | `id, name, input` | types/messages.rs |
+| `ContentBlock::ToolResult` | Tool result block | `tool_use_id, content, is_error` | types/messages.rs |
+| `ContentBlock::Image` | Image block | `source: ImageSource` | types/messages.rs |
 
-### 3.3 用户内容块类型
+### 3.3 User content block types
 
-| 类型 | 描述 | 源文件位置 |
-|------|------|------------|
-| `UserContentBlock::Text` | 用户文本 | types/messages.rs |
-| `UserContentBlock::Image` | 用户图像 | types/messages.rs |
+| Type | Description | Source |
+|------|-------------|--------|
+| `UserContentBlock::Text` | User text | types/messages.rs |
+| `UserContentBlock::Image` | User image | types/messages.rs |
 
-### 3.4 消息结构详情
+### 3.4 Message struct details
 
-| 结构 | 关键字段 | 源文件位置 |
-|------|---------|------------|
+| Struct | Key fields | Source |
+|--------|------------|--------|
 | `AssistantMessage` | message, parent_tool_use_id, session_id, uuid | types/messages.rs |
 | `UserMessage` | text, content, uuid, parent_tool_use_id | types/messages.rs |
 | `SystemMessage` | subtype, cwd, session_id, tools, mcp_servers, model | types/messages.rs |
@@ -112,313 +112,313 @@ vendors/claude-agent-sdk-rs/src/
 
 ---
 
-## 4. 钩子系统 (Hooks)
+## 4. Hook system (Hooks)
 
-### 4.1 钩子事件类型
+### 4.1 Hook event types
 
-| 事件 | 触发时机 | 输入类型 | 源文件位置 |
-|------|---------|---------|------------|
-| `PreToolUse` | 工具使用前 | `PreToolUseHookInput` | types/hooks.rs |
-| `PostToolUse` | 工具使用后 | `PostToolUseHookInput` | types/hooks.rs |
-| `UserPromptSubmit` | 用户提交提示时 | `UserPromptSubmitHookInput` | types/hooks.rs |
-| `Stop` | 执行停止时 | `StopHookInput` | types/hooks.rs |
-| `SubagentStop` | 子代理停止时 | `SubagentStopHookInput` | types/hooks.rs |
-| `PreCompact` | 对话压缩前 | `PreCompactHookInput` | types/hooks.rs |
+| Event | Trigger | Input type | Source |
+|------|---------|------------|--------|
+| `PreToolUse` | Before a tool is used | `PreToolUseHookInput` | types/hooks.rs |
+| `PostToolUse` | After a tool is used | `PostToolUseHookInput` | types/hooks.rs |
+| `UserPromptSubmit` | When the user submits a prompt | `UserPromptSubmitHookInput` | types/hooks.rs |
+| `Stop` | When execution stops | `StopHookInput` | types/hooks.rs |
+| `SubagentStop` | When a sub-agent stops | `SubagentStopHookInput` | types/hooks.rs |
+| `PreCompact` | Before conversation compaction | `PreCompactHookInput` | types/hooks.rs |
 
-### 4.2 钩子输入结构
+### 4.2 Hook input structs
 
-| 结构 | 关键字段 | 源文件位置 |
-|------|---------|------------|
+| Struct | Key fields | Source |
+|--------|------------|--------|
 | `PreToolUseHookInput` | session_id, transcript_path, cwd, permission_mode, tool_name, tool_input | types/hooks.rs |
-| `PostToolUseHookInput` | 同上 + tool_response | types/hooks.rs |
+| `PostToolUseHookInput` | same as above + tool_response | types/hooks.rs |
 | `UserPromptSubmitHookInput` | session_id, transcript_path, cwd, permission_mode, prompt | types/hooks.rs |
 
-### 4.3 钩子输出类型
+### 4.3 Hook output types
 
-| 类型 | 描述 | 源文件位置 |
-|------|------|------------|
-| `HookJsonOutput::Sync` | 同步输出，阻塞执行 | types/hooks.rs |
-| `HookJsonOutput::Async` | 异步输出，后台执行 | types/hooks.rs |
+| Type | Description | Source |
+|------|-------------|--------|
+| `HookJsonOutput::Sync` | Synchronous output (blocks execution) | types/hooks.rs |
+| `HookJsonOutput::Async` | Asynchronous output (runs in background) | types/hooks.rs |
 
-### 4.4 同步钩子输出字段
+### 4.4 Sync hook output fields
 
-| 字段 | 类型 | 描述 | 源文件位置 |
-|------|------|------|------------|
-| `continue_` | `Option<bool>` | 是否继续执行 | types/hooks.rs |
-| `suppress_output` | `Option<bool>` | 是否抑制输出 | types/hooks.rs |
-| `stop_reason` | `Option<String>` | 停止原因 | types/hooks.rs |
-| `decision` | `Option<String>` | 权限决策 | types/hooks.rs |
-| `system_message` | `Option<String>` | 系统消息 | types/hooks.rs |
-| `reason` | `Option<String>` | 决策原因 | types/hooks.rs |
+| Field | Type | Description | Source |
+|------|------|-------------|--------|
+| `continue_` | `Option<bool>` | Whether to continue execution | types/hooks.rs |
+| `suppress_output` | `Option<bool>` | Whether to suppress output | types/hooks.rs |
+| `stop_reason` | `Option<String>` | Stop reason | types/hooks.rs |
+| `decision` | `Option<String>` | Permission decision | types/hooks.rs |
+| `system_message` | `Option<String>` | System message | types/hooks.rs |
+| `reason` | `Option<String>` | Decision reason | types/hooks.rs |
 
 ### 4.5 Hooks Builder API
 
-| 方法 | 描述 | 源文件位置 |
-|------|------|------------|
-| `Hooks::new()` | 创建新的钩子构造器 | types/hooks.rs |
-| `add_pre_tool_use()` | 添加全局 PreToolUse 钩子 | types/hooks.rs |
-| `add_pre_tool_use_with_matcher()` | 添加针对特定工具的钩子 | types/hooks.rs |
-| `add_post_tool_use()` | 添加 PostToolUse 钩子 | types/hooks.rs |
-| `add_post_tool_use_with_matcher()` | 针对特定工具的后处理 | types/hooks.rs |
-| `add_user_prompt_submit()` | 添加用户提示钩子 | types/hooks.rs |
-| `add_stop()` | 添加停止钩子 | types/hooks.rs |
-| `add_subagent_stop()` | 添加子代理停止钩子 | types/hooks.rs |
-| `add_pre_compact()` | 添加压缩前钩子 | types/hooks.rs |
-| `build()` | 构建最终配置 | types/hooks.rs |
+| Method | Description | Source |
+|--------|-------------|--------|
+| `Hooks::new()` | Create a new Hooks builder | types/hooks.rs |
+| `add_pre_tool_use()` | Add a global PreToolUse hook | types/hooks.rs |
+| `add_pre_tool_use_with_matcher()` | Add a hook for a specific tool | types/hooks.rs |
+| `add_post_tool_use()` | Add a PostToolUse hook | types/hooks.rs |
+| `add_post_tool_use_with_matcher()` | Add post-processing for a specific tool | types/hooks.rs |
+| `add_user_prompt_submit()` | Add a user prompt hook | types/hooks.rs |
+| `add_stop()` | Add a stop hook | types/hooks.rs |
+| `add_subagent_stop()` | Add a sub-agent stop hook | types/hooks.rs |
+| `add_pre_compact()` | Add a pre-compaction hook | types/hooks.rs |
+| `build()` | Build the final configuration | types/hooks.rs |
 
 ---
 
-## 5. 权限系统
+## 5. Permission system
 
-### 5.1 权限模式
+### 5.1 Permission modes
 
-| 模式 | 描述 | 源文件位置 |
-|------|------|------------|
-| `PermissionMode::Default` | 提示用户确认 | types/permissions.rs |
-| `PermissionMode::AcceptEdits` | 自动接受编辑 | types/permissions.rs |
-| `PermissionMode::Plan` | 计划模式 | types/permissions.rs |
-| `PermissionMode::BypassPermissions` | 绕过所有权限检查 | types/permissions.rs |
+| Mode | Description | Source |
+|------|-------------|--------|
+| `PermissionMode::Default` | Prompt the user for confirmation | types/permissions.rs |
+| `PermissionMode::AcceptEdits` | Automatically accept edits | types/permissions.rs |
+| `PermissionMode::Plan` | Planning mode | types/permissions.rs |
+| `PermissionMode::BypassPermissions` | Bypass all permission checks | types/permissions.rs |
 
-### 5.2 权限回调
+### 5.2 Permission callback
 
-| 类型 | 描述 | 源文件位置 |
-|------|------|------------|
-| `CanUseToolCallback` | 工具使用权限检查回调 | types/permissions.rs |
+| Type | Description | Source |
+|------|-------------|--------|
+| `CanUseToolCallback` | Callback for tool permission checks | types/permissions.rs |
 
-### 5.3 权限结果类型
+### 5.3 Permission result types
 
-| 类型 | 描述 | 源文件位置 |
-|------|------|------------|
-| `PermissionResult::Allow` | 允许执行（可带修改后的输入） | types/permissions.rs |
-| `PermissionResult::Deny` | 拒绝执行（带消息和中断标志） | types/permissions.rs |
+| Type | Description | Source |
+|------|-------------|--------|
+| `PermissionResult::Allow` | Allow execution (optionally with modified input) | types/permissions.rs |
+| `PermissionResult::Deny` | Deny execution (with message + interrupt flag) | types/permissions.rs |
 
-### 5.4 权限更新类型
+### 5.4 Permission update types
 
-| 类型 | 描述 | 源文件位置 |
-|------|------|------------|
-| `AddRules` | 添加权限规则 | types/permissions.rs |
-| `ReplaceRules` | 替换权限规则 | types/permissions.rs |
-| `RemoveRules` | 移除权限规则 | types/permissions.rs |
-| `SetMode` | 设置权限模式 | types/permissions.rs |
-| `AddDirectories` | 添加目录 | types/permissions.rs |
-| `RemoveDirectories` | 移除目录 | types/permissions.rs |
+| Type | Description | Source |
+|------|-------------|--------|
+| `AddRules` | Add permission rules | types/permissions.rs |
+| `ReplaceRules` | Replace permission rules | types/permissions.rs |
+| `RemoveRules` | Remove permission rules | types/permissions.rs |
+| `SetMode` | Set permission mode | types/permissions.rs |
+| `AddDirectories` | Add directories | types/permissions.rs |
+| `RemoveDirectories` | Remove directories | types/permissions.rs |
 
-### 5.5 权限行为
+### 5.5 Permission behaviors
 
-| 行为 | 描述 | 源文件位置 |
-|------|------|------------|
-| `PermissionBehavior::Allow` | 允许 | types/permissions.rs |
-| `PermissionBehavior::Deny` | 拒绝 | types/permissions.rs |
-| `PermissionBehavior::Ask` | 询问用户 | types/permissions.rs |
+| Behavior | Description | Source |
+|----------|-------------|--------|
+| `PermissionBehavior::Allow` | Allow | types/permissions.rs |
+| `PermissionBehavior::Deny` | Deny | types/permissions.rs |
+| `PermissionBehavior::Ask` | Ask the user | types/permissions.rs |
 
 ---
 
-## 6. MCP 服务器支持
+## 6. MCP server support
 
-### 6.1 服务器类型
+### 6.1 Server types
 
-| 类型 | 配置结构 | 描述 | 源文件位置 |
-|------|---------|------|------------|
-| Stdio | `McpStdioServerConfig` | 标准 IO 协议 | types/mcp.rs |
-| SSE | `McpSseServerConfig` | 服务端事件 | types/mcp.rs |
-| HTTP | `McpHttpServerConfig` | HTTP 协议 | types/mcp.rs |
-| Sdk | `McpSdkServerConfig` | 进程内 MCP 服务器 | types/mcp.rs |
+| Type | Config struct | Description | Source |
+|------|---------------|-------------|--------|
+| Stdio | `McpStdioServerConfig` | Standard IO transport | types/mcp.rs |
+| SSE | `McpSseServerConfig` | Server-Sent Events transport | types/mcp.rs |
+| HTTP | `McpHttpServerConfig` | HTTP transport | types/mcp.rs |
+| Sdk | `McpSdkServerConfig` | In-process MCP server | types/mcp.rs |
 
-### 6.2 服务器配置
+### 6.2 Server configuration
 
-| 配置 | 字段 | 源文件位置 |
-|------|------|------------|
+| Config | Fields | Source |
+|--------|--------|--------|
 | `McpStdioServerConfig` | command, args, env | types/mcp.rs |
 | `McpSseServerConfig` | url, headers | types/mcp.rs |
 | `McpHttpServerConfig` | url, headers | types/mcp.rs |
 | `McpSdkServerConfig` | name, instance | types/mcp.rs |
 
-### 6.3 SDK MCP 工具
+### 6.3 SDK MCP tools
 
-| 类型 | 描述 | 源文件位置 |
-|------|------|------------|
-| `SdkMcpTool` | SDK MCP 工具定义 | types/mcp.rs |
-| `ToolHandler` | 工具处理 trait | types/mcp.rs |
-| `ToolResult` | 工具执行结果 | types/mcp.rs |
-| `ToolResultContent` | 工具结果内容（Text/Image） | types/mcp.rs |
+| Type | Description | Source |
+|------|-------------|--------|
+| `SdkMcpTool` | SDK MCP tool definition | types/mcp.rs |
+| `ToolHandler` | Tool handler trait | types/mcp.rs |
+| `ToolResult` | Tool execution result | types/mcp.rs |
+| `ToolResultContent` | Tool result content (Text/Image) | types/mcp.rs |
 
-### 6.4 辅助函数
+### 6.4 Helper functions
 
-| 函数 | 描述 | 源文件位置 |
-|------|------|------------|
-| `create_sdk_mcp_server()` | 创建 SDK MCP 服务器 | types/mcp.rs |
+| Function | Description | Source |
+|----------|-------------|--------|
+| `create_sdk_mcp_server()` | Create an SDK MCP server | types/mcp.rs |
 
 ---
 
-## 7. 配置选项 (ClaudeAgentOptions)
+## 7. Configuration options (ClaudeAgentOptions)
 
-### 7.1 基础配置
+### 7.1 Basic configuration
 
-| 配置项 | 类型 | 描述 | 源文件位置 |
-|--------|------|------|------------|
-| `model` | `Option<String>` | 模型选择 | types/config.rs |
-| `fallback_model` | `Option<String>` | 备用模型 | types/config.rs |
-| `max_turns` | `Option<u32>` | 最大回合数 | types/config.rs |
-| `max_budget_usd` | `Option<f64>` | USD 预算限制 | types/config.rs |
-| `max_thinking_tokens` | `Option<u32>` | 扩展思维令牌限制 | types/config.rs |
+| Option | Type | Description | Source |
+|--------|------|-------------|--------|
+| `model` | `Option<String>` | Model selection | types/config.rs |
+| `fallback_model` | `Option<String>` | Fallback model | types/config.rs |
+| `max_turns` | `Option<u32>` | Maximum turns | types/config.rs |
+| `max_budget_usd` | `Option<f64>` | USD budget limit | types/config.rs |
+| `max_thinking_tokens` | `Option<u32>` | Extended thinking token limit | types/config.rs |
 
-### 7.2 工具配置
+### 7.2 Tool configuration
 
-| 配置项 | 类型 | 描述 | 源文件位置 |
-|--------|------|------|------------|
-| `tools` | `Option<Tools>` | 工具配置（列表或预设） | types/config.rs |
-| `allowed_tools` | `Vec<String>` | 允许的工具列表 | types/config.rs |
-| `disallowed_tools` | `Vec<String>` | 禁止的工具列表 | types/config.rs |
-| `mcp_servers` | `McpServers` | MCP 服务器配置 | types/config.rs |
+| Option | Type | Description | Source |
+|--------|------|-------------|--------|
+| `tools` | `Option<Tools>` | Tools configuration (list or preset) | types/config.rs |
+| `allowed_tools` | `Vec<String>` | Allowed tool list | types/config.rs |
+| `disallowed_tools` | `Vec<String>` | Disallowed tool list | types/config.rs |
+| `mcp_servers` | `McpServers` | MCP server configuration | types/config.rs |
 
-### 7.3 系统配置
+### 7.3 System configuration
 
-| 配置项 | 类型 | 描述 | 源文件位置 |
-|--------|------|------|------------|
-| `system_prompt` | `Option<SystemPrompt>` | 系统提示（文本或预设） | types/config.rs |
-| `permission_mode` | `Option<PermissionMode>` | 权限模式 | types/config.rs |
-| `permission_prompt_tool_name` | `Option<String>` | 权限提示工具名 | types/config.rs |
+| Option | Type | Description | Source |
+|--------|------|-------------|--------|
+| `system_prompt` | `Option<SystemPrompt>` | System prompt (text or preset) | types/config.rs |
+| `permission_mode` | `Option<PermissionMode>` | Permission mode | types/config.rs |
+| `permission_prompt_tool_name` | `Option<String>` | Tool name used for permission prompts | types/config.rs |
 
-### 7.4 会话管理
+### 7.4 Session management
 
-| 配置项 | 类型 | 描述 | 源文件位置 |
-|--------|------|------|------------|
-| `resume` | `Option<String>` | 恢复会话 ID | types/config.rs |
-| `fork_session` | `bool` | 是否每次重新开始 | types/config.rs |
-| `continue_conversation` | `bool` | 是否继续对话 | types/config.rs |
+| Option | Type | Description | Source |
+|--------|------|-------------|--------|
+| `resume` | `Option<String>` | Session ID to resume | types/config.rs |
+| `fork_session` | `bool` | Whether to fork a new session each time | types/config.rs |
+| `continue_conversation` | `bool` | Whether to continue an existing conversation | types/config.rs |
 
-### 7.5 环境配置
+### 7.5 Environment configuration
 
-| 配置项 | 类型 | 描述 | 源文件位置 |
-|--------|------|------|------------|
-| `cwd` | `Option<PathBuf>` | 工作目录 | types/config.rs |
-| `cli_path` | `Option<PathBuf>` | CLI 路径 | types/config.rs |
-| `settings` | `Option<String>` | 设置文件 | types/config.rs |
-| `add_dirs` | `Vec<PathBuf>` | 添加目录 | types/config.rs |
-| `env` | `HashMap<String, String>` | 环境变量 | types/config.rs |
+| Option | Type | Description | Source |
+|--------|------|-------------|--------|
+| `cwd` | `Option<PathBuf>` | Working directory | types/config.rs |
+| `cli_path` | `Option<PathBuf>` | CLI path | types/config.rs |
+| `settings` | `Option<String>` | Settings file | types/config.rs |
+| `add_dirs` | `Vec<PathBuf>` | Additional directories | types/config.rs |
+| `env` | `HashMap<String, String>` | Environment variables | types/config.rs |
 
-### 7.6 高级功能
+### 7.6 Advanced features
 
-| 配置项 | 类型 | 描述 | 源文件位置 |
-|--------|------|------|------------|
-| `hooks` | `Option<HashMap<HookEvent, Vec<HookMatcher>>>` | 钩子配置 | types/config.rs |
-| `can_use_tool` | `Option<CanUseToolCallback>` | 权限检查回调 | types/config.rs |
-| `plugins` | `Vec<SdkPluginConfig>` | 插件配置 | types/config.rs |
-| `sandbox` | `Option<SandboxSettings>` | 沙箱配置 | types/config.rs |
-| `enable_file_checkpointing` | `bool` | 文件检查点 | types/config.rs |
+| Option | Type | Description | Source |
+|--------|------|-------------|--------|
+| `hooks` | `Option<HashMap<HookEvent, Vec<HookMatcher>>>` | Hook configuration | types/config.rs |
+| `can_use_tool` | `Option<CanUseToolCallback>` | Permission check callback | types/config.rs |
+| `plugins` | `Vec<SdkPluginConfig>` | Plugin configuration | types/config.rs |
+| `sandbox` | `Option<SandboxSettings>` | Sandbox settings | types/config.rs |
+| `enable_file_checkpointing` | `bool` | File checkpointing | types/config.rs |
 
-### 7.7 流式处理
+### 7.7 Streaming
 
-| 配置项 | 类型 | 描述 | 源文件位置 |
-|--------|------|------|------------|
-| `include_partial_messages` | `bool` | 包含部分消息 | types/config.rs |
+| Option | Type | Description | Source |
+|--------|------|-------------|--------|
+| `include_partial_messages` | `bool` | Include partial messages | types/config.rs |
 
-### 7.8 输出配置
+### 7.8 Output configuration
 
-| 配置项 | 类型 | 描述 | 源文件位置 |
-|--------|------|------|------------|
-| `output_format` | `Option<serde_json::Value>` | 输出格式（JSON Schema） | types/config.rs |
+| Option | Type | Description | Source |
+|--------|------|-------------|--------|
+| `output_format` | `Option<serde_json::Value>` | Output format (JSON Schema) | types/config.rs |
 
-### 7.9 其他配置
+### 7.9 Other options
 
-| 配置项 | 类型 | 描述 | 源文件位置 |
-|--------|------|------|------------|
-| `user` | `Option<String>` | 用户标识 | types/config.rs |
-| `setting_sources` | `Option<Vec<SettingSource>>` | 设置来源 | types/config.rs |
-| `agents` | `Option<HashMap<String, AgentDefinition>>` | 自定义代理 | types/config.rs |
-| `betas` | `Vec<SdkBeta>` | Beta 功能 | types/config.rs |
-| `extra_args` | `HashMap<String, Option<String>>` | 额外 CLI 参数 | types/config.rs |
-| `max_buffer_size` | `Option<usize>` | 缓冲区大小 | types/config.rs |
-| `stderr_callback` | `Option<Arc<dyn Fn(String) + Send + Sync>>` | 标准错误回调 | types/config.rs |
+| Option | Type | Description | Source |
+|--------|------|-------------|--------|
+| `user` | `Option<String>` | User identifier | types/config.rs |
+| `setting_sources` | `Option<Vec<SettingSource>>` | Settings sources | types/config.rs |
+| `agents` | `Option<HashMap<String, AgentDefinition>>` | Custom agents | types/config.rs |
+| `betas` | `Vec<SdkBeta>` | Beta features | types/config.rs |
+| `extra_args` | `HashMap<String, Option<String>>` | Extra CLI args | types/config.rs |
+| `max_buffer_size` | `Option<usize>` | Buffer size | types/config.rs |
+| `stderr_callback` | `Option<Arc<dyn Fn(String) + Send + Sync>>` | stderr callback | types/config.rs |
 
-### 7.10 系统提示配置
+### 7.10 System prompt configuration
 
-| 类型 | 描述 | 源文件位置 |
-|------|------|------------|
-| `SystemPrompt::Text(String)` | 直接文本 | types/config.rs |
-| `SystemPrompt::Preset(SystemPromptPreset)` | 预设（含 append） | types/config.rs |
+| Type | Description | Source |
+|------|-------------|--------|
+| `SystemPrompt::Text(String)` | Direct text prompt | types/config.rs |
+| `SystemPrompt::Preset(SystemPromptPreset)` | Preset (includes append) | types/config.rs |
 
-### 7.11 工具配置
+### 7.11 Tools configuration
 
-| 类型 | 描述 | 源文件位置 |
-|------|------|------------|
-| `Tools::List(Vec<String>)` | 工具名列表 | types/config.rs |
-| `Tools::Preset(ToolsPreset)` | 预设 | types/config.rs |
+| Type | Description | Source |
+|------|-------------|--------|
+| `Tools::List(Vec<String>)` | List of tool names | types/config.rs |
+| `Tools::Preset(ToolsPreset)` | Preset | types/config.rs |
 
-### 7.12 设置来源
+### 7.12 Settings sources
 
-| 来源 | 描述 | 源文件位置 |
-|------|------|------------|
+| Source | Description | Source file |
+|--------|-------------|------------|
 | `SettingSource::User` | ~/.claude/settings.json | types/config.rs |
 | `SettingSource::Project` | .claude/settings.json | types/config.rs |
-| `SettingSource::Local` | .claude/settings.local.json (最高优先级) | types/config.rs |
+| `SettingSource::Local` | .claude/settings.local.json (highest priority) | types/config.rs |
 
-### 7.13 代理定义
+### 7.13 Agent definition
 
-| 字段 | 类型 | 描述 | 源文件位置 |
-|------|------|------|------------|
-| `description` | `String` | 代理描述 | types/config.rs |
-| `prompt` | `String` | 代理提示 | types/config.rs |
-| `tools` | `Option<Vec<String>>` | 可用工具 | types/config.rs |
-| `model` | `Option<AgentModel>` | 代理模型 | types/config.rs |
+| Field | Type | Description | Source |
+|------|------|-------------|--------|
+| `description` | `String` | Agent description | types/config.rs |
+| `prompt` | `String` | Agent prompt | types/config.rs |
+| `tools` | `Option<Vec<String>>` | Available tools | types/config.rs |
+| `model` | `Option<AgentModel>` | Agent model | types/config.rs |
 
-### 7.14 代理模型
+### 7.14 Agent models
 
-| 模型 | 描述 | 源文件位置 |
-|------|------|------------|
+| Model | Description | Source |
+|------|-------------|--------|
 | `AgentModel::Sonnet` | Claude Sonnet | types/config.rs |
 | `AgentModel::Opus` | Claude Opus | types/config.rs |
 | `AgentModel::Haiku` | Claude Haiku | types/config.rs |
-| `AgentModel::Inherit` | 继承父模型 | types/config.rs |
+| `AgentModel::Inherit` | Inherit parent model | types/config.rs |
 
-### 7.15 沙箱配置
+### 7.15 Sandbox settings
 
-| 字段 | 类型 | 描述 | 源文件位置 |
-|------|------|------|------------|
-| `enabled` | `Option<bool>` | 启用沙箱 | types/config.rs |
-| `auto_allow_bash_if_sandboxed` | `Option<bool>` | 自动允许沙箱内 bash | types/config.rs |
-| `excluded_commands` | `Option<Vec<String>>` | 排除命令 | types/config.rs |
-| `allow_unsandboxed_commands` | `Option<bool>` | 允许非沙箱命令 | types/config.rs |
-| `network` | `Option<SandboxNetworkConfig>` | 网络配置 | types/config.rs |
+| Field | Type | Description | Source |
+|------|------|-------------|--------|
+| `enabled` | `Option<bool>` | Enable sandbox | types/config.rs |
+| `auto_allow_bash_if_sandboxed` | `Option<bool>` | Auto-allow bash when sandboxed | types/config.rs |
+| `excluded_commands` | `Option<Vec<String>>` | Excluded commands | types/config.rs |
+| `allow_unsandboxed_commands` | `Option<bool>` | Allow unsandboxed commands | types/config.rs |
+| `network` | `Option<SandboxNetworkConfig>` | Network configuration | types/config.rs |
 
 ### 7.16 Builder API
 
-| 方法 | 描述 | 源文件位置 |
-|------|------|------------|
-| `ClaudeAgentOptions::builder()` | 创建 Builder | types/config.rs |
-| `.model()` | 设置模型 | types/config.rs |
-| `.fallback_model()` | 设置备用模型 | types/config.rs |
-| `.max_budget_usd()` | 设置预算 | types/config.rs |
-| `.max_thinking_tokens()` | 设置思维令牌 | types/config.rs |
-| `.max_turns()` | 设置回合数 | types/config.rs |
-| `.permission_mode()` | 设置权限模式 | types/config.rs |
-| `.plugins()` | 设置插件 | types/config.rs |
-| `.build()` | 构建配置 | types/config.rs |
+| Method | Description | Source |
+|--------|-------------|--------|
+| `ClaudeAgentOptions::builder()` | Create a builder | types/config.rs |
+| `.model()` | Set model | types/config.rs |
+| `.fallback_model()` | Set fallback model | types/config.rs |
+| `.max_budget_usd()` | Set budget | types/config.rs |
+| `.max_thinking_tokens()` | Set thinking token limit | types/config.rs |
+| `.max_turns()` | Set max turns | types/config.rs |
+| `.permission_mode()` | Set permission mode | types/config.rs |
+| `.plugins()` | Set plugins | types/config.rs |
+| `.build()` | Build config | types/config.rs |
 
 ---
 
-## 8. 错误处理
+## 8. Error handling
 
-### 8.1 主错误类型
+### 8.1 Main error type
 
-| 错误类型 | 描述 | 源文件位置 |
-|---------|------|------------|
-| `ClaudeError::Connection` | CLI 连接错误 | errors.rs |
-| `ClaudeError::Process` | 进程错误 | errors.rs |
-| `ClaudeError::JsonDecode` | JSON 解码错误 | errors.rs |
-| `ClaudeError::MessageParse` | 消息解析错误 | errors.rs |
-| `ClaudeError::Transport` | 传输错误 | errors.rs |
-| `ClaudeError::ControlProtocol` | 控制协议错误 | errors.rs |
-| `ClaudeError::InvalidConfig` | 配置无效 | errors.rs |
-| `ClaudeError::CliNotFound` | CLI 未找到 | errors.rs |
-| `ClaudeError::ImageValidation` | 图像验证错误 | errors.rs |
-| `ClaudeError::Io` | IO 错误 | errors.rs |
-| `ClaudeError::Other` | 其他错误 | errors.rs |
+| Error variant | Description | Source |
+|--------------|-------------|--------|
+| `ClaudeError::Connection` | CLI connection error | errors.rs |
+| `ClaudeError::Process` | Process error | errors.rs |
+| `ClaudeError::JsonDecode` | JSON decode error | errors.rs |
+| `ClaudeError::MessageParse` | Message parse error | errors.rs |
+| `ClaudeError::Transport` | Transport error | errors.rs |
+| `ClaudeError::ControlProtocol` | Control protocol error | errors.rs |
+| `ClaudeError::InvalidConfig` | Invalid configuration | errors.rs |
+| `ClaudeError::CliNotFound` | CLI not found | errors.rs |
+| `ClaudeError::ImageValidation` | Image validation error | errors.rs |
+| `ClaudeError::Io` | IO error | errors.rs |
+| `ClaudeError::Other` | Other error | errors.rs |
 
-### 8.2 具体错误结构
+### 8.2 Specific error structs
 
-| 错误结构 | 字段 | 源文件位置 |
-|---------|------|------------|
+| Error struct | Fields | Source |
+|-------------|--------|--------|
 | `ConnectionError` | message | errors.rs |
 | `ProcessError` | message, exit_code, stderr | errors.rs |
 | `JsonDecodeError` | message, line | errors.rs |
@@ -426,104 +426,104 @@ vendors/claude-agent-sdk-rs/src/
 | `CliNotFoundError` | message, cli_path | errors.rs |
 | `ImageValidationError` | message | errors.rs |
 
-### 8.3 图像验证约束
+### 8.3 Image validation constraints
 
-| 约束 | 值 | 源文件位置 |
-|------|-----|------------|
-| 支持的 MIME 类型 | image/jpeg, image/png, image/gif, image/webp | errors.rs |
-| Base64 最大大小 | 15MB（解码后约 20MB） | errors.rs |
-
----
-
-## 9. 版本管理
-
-| 功能 | 描述 | 源文件位置 |
-|------|------|------------|
-| `SDK_VERSION` | 当前 SDK 版本 | version.rs |
-| `MIN_CLI_VERSION` | 最低 CLI 版本要求 (2.0.0) | version.rs |
-| `SKIP_VERSION_CHECK_ENV` | 跳过版本检查的环境变量 | version.rs |
-| `parse_version()` | 解析版本字符串 | version.rs |
-| `check_version()` | 检查 CLI 版本兼容性 | version.rs |
+| Constraint | Value | Source |
+|-----------|-------|--------|
+| Supported MIME types | image/jpeg, image/png, image/gif, image/webp | errors.rs |
+| Base64 max size | 15MB (about 20MB after decode) | errors.rs |
 
 ---
 
-## 10. 特色功能
+## 9. Version management
 
-### 10.1 多模态输入支持
-
-| 功能 | 方法 | 描述 | 源文件位置 |
-|------|------|------|------------|
-| Base64 图像 | `UserContentBlock::image_base64()` | 从 Base64 创建图像 | types/messages.rs |
-| URL 图像 | `UserContentBlock::image_url()` | 从 URL 创建图像 | types/messages.rs |
-
-### 10.2 扩展思维支持
-
-| 功能 | 描述 | 源文件位置 |
-|------|------|------------|
-| `ThinkingBlock` | 获取模型的推理过程 | types/messages.rs |
-| `max_thinking_tokens` | 限制思维令牌数量 | types/config.rs |
-
-### 10.3 成本控制
-
-| 功能 | 描述 | 源文件位置 |
-|------|------|------------|
-| `max_budget_usd` | USD 预算限制 | types/config.rs |
-| `fallback_model` | 主模型失败时的备用模型 | types/config.rs |
-| `ResultMessage.total_cost_usd` | 查询成本 | types/messages.rs |
-
-### 10.4 文件检查点
-
-| 功能 | 描述 | 源文件位置 |
-|------|------|------------|
-| `enable_file_checkpointing` | 启用文件变更跟踪 | types/config.rs |
-| `rewind_files()` | 将文件回退到特定用户消息状态 | client.rs |
-
-### 10.5 插件系统
-
-| 功能 | 描述 | 源文件位置 |
-|------|------|------------|
-| `SdkPluginConfig::local()` | 加载本地插件 | types/plugin.rs |
+| Feature | Description | Source |
+|--------|-------------|--------|
+| `SDK_VERSION` | Current SDK version | version.rs |
+| `MIN_CLI_VERSION` | Minimum required CLI version (2.0.0) | version.rs |
+| `SKIP_VERSION_CHECK_ENV` | Env var to skip version checks | version.rs |
+| `parse_version()` | Parse a version string | version.rs |
+| `check_version()` | Check CLI version compatibility | version.rs |
 
 ---
 
-## 功能统计
+## 10. Notable features
 
-| 分类 | 功能数 |
-|------|--------|
-| 客户端方法 | 16 |
-| 简单查询 API | 4 |
-| 消息类型 | 5 |
-| 内容块类型 | 5 |
-| 用户内容块类型 | 2 |
-| 钩子事件 | 6 |
-| 钩子 Builder 方法 | 10 |
-| 权限模式 | 4 |
-| 权限更新类型 | 6 |
-| MCP 服务器类型 | 4 |
-| 配置项 | 30+ |
-| 错误类型 | 11 |
-| **总计** | **100+** |
+### 10.1 Multimodal input support
+
+| Feature | Method | Description | Source |
+|--------|--------|-------------|--------|
+| Base64 image | `UserContentBlock::image_base64()` | Create an image from base64 | types/messages.rs |
+| URL image | `UserContentBlock::image_url()` | Create an image from a URL | types/messages.rs |
+
+### 10.2 Extended thinking support
+
+| Feature | Description | Source |
+|--------|-------------|--------|
+| `ThinkingBlock` | Capture model reasoning output | types/messages.rs |
+| `max_thinking_tokens` | Limit thinking token count | types/config.rs |
+
+### 10.3 Cost control
+
+| Feature | Description | Source |
+|--------|-------------|--------|
+| `max_budget_usd` | USD budget limit | types/config.rs |
+| `fallback_model` | Fallback model when the primary fails | types/config.rs |
+| `ResultMessage.total_cost_usd` | Query cost | types/messages.rs |
+
+### 10.4 File checkpointing
+
+| Feature | Description | Source |
+|--------|-------------|--------|
+| `enable_file_checkpointing` | Enable file change tracking | types/config.rs |
+| `rewind_files()` | Rewind files to a specific user message state | client.rs |
+
+### 10.5 Plugin system
+
+| Feature | Description | Source |
+|--------|-------------|--------|
+| `SdkPluginConfig::local()` | Load a local plugin | types/plugin.rs |
 
 ---
 
-## 依赖关系
+## Feature counts
+
+| Category | Count |
+|----------|-------|
+| Client methods | 16 |
+| Simple query APIs | 4 |
+| Message types | 5 |
+| Content block types | 5 |
+| User content block types | 2 |
+| Hook events | 6 |
+| Hook builder methods | 10 |
+| Permission modes | 4 |
+| Permission update types | 6 |
+| MCP server types | 4 |
+| Config options | 30+ |
+| Error variants | 11 |
+| **Total** | **100+** |
+
+---
+
+## Dependencies
 
 ```
-主要依赖:
-- tokio (1.48)         # 异步运行时
-- async-trait (0.1)    # 异步 trait
-- futures (0.3)        # Future 工具
-- serde (1.0)          # 序列化
+Main dependencies:
+- tokio (1.48)         # async runtime
+- async-trait (0.1)    # async traits
+- futures (0.3)        # Future utilities
+- serde (1.0)          # serialization
 - serde_json (1.0)     # JSON
-- thiserror (2.0)      # 错误处理
-- anyhow (1.0)         # 错误处理
-- tracing (0.1)        # 日志
-- uuid (1.19)          # UUID 生成
-- typed-builder        # Builder 模式
+- thiserror (2.0)      # error types
+- anyhow (1.0)         # error handling
+- tracing (0.1)        # logging
+- uuid (1.19)          # UUID generation
+- typed-builder        # builder pattern
 ```
 
 ---
 
-## 更新日志
+## Changelog
 
-- 2024-01-07: 初始版本，基于 claude-agent-sdk-rs v0.5.0 分析
+- 2024-01-07: Initial version based on analysis of claude-agent-sdk-rs v0.5.0

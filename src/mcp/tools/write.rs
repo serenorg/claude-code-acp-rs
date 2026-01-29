@@ -101,18 +101,18 @@ impl Tool for WriteTool {
         let total_start = Instant::now();
 
         // Create parent directories if they don't exist
-        if let Some(parent) = path.parent() {
-            if !parent.exists() {
-                let dir_start = Instant::now();
-                if let Err(e) = tokio::fs::create_dir_all(parent).await {
-                    return ToolResult::error(format!("Failed to create directory: {}", e));
-                }
-                tracing::debug!(
-                    parent_dir = %parent.display(),
-                    dir_creation_duration_ms = dir_start.elapsed().as_millis(),
-                    "Parent directories created"
-                );
+        if let Some(parent) = path.parent()
+            && !parent.exists()
+        {
+            let dir_start = Instant::now();
+            if let Err(e) = tokio::fs::create_dir_all(parent).await {
+                return ToolResult::error(format!("Failed to create directory: {}", e));
             }
+            tracing::debug!(
+                parent_dir = %parent.display(),
+                dir_creation_duration_ms = dir_start.elapsed().as_millis(),
+                "Parent directories created"
+            );
         }
 
         // Check if file exists (for reporting)

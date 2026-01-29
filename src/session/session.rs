@@ -35,8 +35,8 @@ use crate::settings::{PermissionChecker, SettingsManager};
 use crate::terminal::TerminalClient;
 use crate::types::{AgentConfig, AgentError, NewSessionMeta, Result};
 
-use super::background_processes::BackgroundTerminal;
 use super::BackgroundProcessManager;
+use super::background_processes::BackgroundTerminal;
 use super::permission::{PermissionHandler, PermissionMode};
 use super::usage::UsageTracker;
 
@@ -301,7 +301,7 @@ impl Session {
             .can_use_tool(can_use_tool_callback)
             .permission_mode(SdkPermissionMode::AcceptEdits)
             // Using circular buffer (ringbuf) - auto-recycles old data, no need for large buffer
-            .max_buffer_size(20 * 1024 * 1024)  // 20MB 缓冲区
+            .max_buffer_size(20 * 1024 * 1024) // 20MB buffer
             .build();
 
         // Debug: Verify can_use_tool is set
@@ -1111,23 +1111,23 @@ impl Session {
         let mut shell_errors = 0;
 
         for shell_id in &shell_ids {
-            if let Some((_, terminal)) = self.background_processes.remove(shell_id) {
-                if let BackgroundTerminal::Running { mut child, .. } = terminal {
-                    match child.kill().await {
-                        Ok(()) => {
-                            // Wait for the process to exit (prevents zombie)
-                            drop(child.wait().await);
-                            shell_success += 1;
-                        }
-                        Err(e) => {
-                            shell_errors += 1;
-                            tracing::warn!(
-                                session_id = %self.session_id,
-                                shell_id = %shell_id,
-                                error = %e,
-                                "Failed to kill background process during cleanup"
-                            );
-                        }
+            if let Some((_, BackgroundTerminal::Running { mut child, .. })) =
+                self.background_processes.remove(shell_id)
+            {
+                match child.kill().await {
+                    Ok(()) => {
+                        // Wait for the process to exit (prevents zombie)
+                        drop(child.wait().await);
+                        shell_success += 1;
+                    }
+                    Err(e) => {
+                        shell_errors += 1;
+                        tracing::warn!(
+                            session_id = %self.session_id,
+                            shell_id = %shell_id,
+                            error = %e,
+                            "Failed to kill background process during cleanup"
+                        );
                     }
                 }
             }

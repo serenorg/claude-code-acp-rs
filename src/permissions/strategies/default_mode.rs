@@ -6,8 +6,8 @@
 //! - Requires user permission for other operations
 
 use crate::command_safety::is_known_safe_command;
-use crate::session::{PermissionMode, ToolPermissionResult};
 use crate::permissions::strategies::PermissionModeStrategy;
+use crate::session::{PermissionMode, ToolPermissionResult};
 use serde_json::Value;
 
 /// Strategy for Default mode - standard permission prompts
@@ -26,10 +26,10 @@ impl PermissionModeStrategy for DefaultModeStrategy {
         }
 
         // Auto-approve known safe Bash commands
-        if tool_name == "Bash" {
-            if let Some(cmd) = tool_input.get("command").and_then(|v| v.as_str()) {
-                return is_known_safe_command(cmd);
-            }
+        if tool_name == "Bash"
+            && let Some(cmd) = tool_input.get("command").and_then(|v| v.as_str())
+        {
+            return is_known_safe_command(cmd);
         }
 
         false

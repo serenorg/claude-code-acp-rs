@@ -428,23 +428,23 @@ impl BashTool {
             // Wait for process to finish and update terminal state
             // Use get() instead of get_mut() because BackgroundTerminal contains ChildHandle
             // We only need a shared reference to clone the ChildHandle
-            if let Some(terminal_ref) = manager_clone.get(&shell_id_clone) {
-                if let BackgroundTerminal::Running { child, .. } = &*terminal_ref {
-                    // Clone the ChildHandle to hold it across await points
-                    let mut child_handle = child.clone();
-                    drop(terminal_ref); // Release DashMap read lock before await
+            if let Some(terminal_ref) = manager_clone.get(&shell_id_clone)
+                && let BackgroundTerminal::Running { child, .. } = &*terminal_ref
+            {
+                // Clone the ChildHandle to hold it across await points
+                let mut child_handle = child.clone();
+                drop(terminal_ref); // Release DashMap read lock before await
 
-                    // ChildHandle::wait() handles locking internally
-                    if let Ok(status) = child_handle.wait().await {
-                        let exit_code = status.code().unwrap_or(-1);
-                        manager_clone
-                            .finish_terminal(&shell_id_clone, TerminalExitStatus::Exited(exit_code))
-                            .await;
-                    } else {
-                        manager_clone
-                            .finish_terminal(&shell_id_clone, TerminalExitStatus::Aborted)
-                            .await;
-                    }
+                // ChildHandle::wait() handles locking internally
+                if let Ok(status) = child_handle.wait().await {
+                    let exit_code = status.code().unwrap_or(-1);
+                    manager_clone
+                        .finish_terminal(&shell_id_clone, TerminalExitStatus::Exited(exit_code))
+                        .await;
+                } else {
+                    manager_clone
+                        .finish_terminal(&shell_id_clone, TerminalExitStatus::Aborted)
+                        .await;
                 }
             }
         });

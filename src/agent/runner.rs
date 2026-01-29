@@ -91,11 +91,11 @@ fn init_otel(endpoint: &str, service_name: &str) -> anyhow::Result<SdkTracerProv
 /// Priority: RUST_LOG environment variable > CLI arguments (-v, -vv, -q)
 fn build_env_filter(cli: &Cli) -> tracing_subscriber::EnvFilter {
     // Check if RUST_LOG is set and non-empty
-    if let Ok(rust_log) = std::env::var("RUST_LOG") {
-        if !rust_log.is_empty() {
-            // RUST_LOG takes priority - use it directly
-            return tracing_subscriber::EnvFilter::new(rust_log);
-        }
+    if let Ok(rust_log) = std::env::var("RUST_LOG")
+        && !rust_log.is_empty()
+    {
+        // RUST_LOG takes priority - use it directly
+        return tracing_subscriber::EnvFilter::new(rust_log);
     }
 
     // No RUST_LOG set, use CLI arguments to determine level

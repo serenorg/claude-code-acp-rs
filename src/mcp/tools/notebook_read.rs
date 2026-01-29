@@ -140,17 +140,17 @@ impl NotebookReadTool {
                             }
                         }
                         "execute_result" | "display_data" => {
-                            if let Some(data) = &cell_output.data {
-                                if let Some(text) = data.get("text/plain") {
-                                    if let Some(lines) = text.as_array() {
-                                        for line in lines {
-                                            if let Some(s) = line.as_str() {
-                                                output.push_str(s);
-                                            }
+                            if let Some(data) = &cell_output.data
+                                && let Some(text) = data.get("text/plain")
+                            {
+                                if let Some(lines) = text.as_array() {
+                                    for line in lines {
+                                        if let Some(s) = line.as_str() {
+                                            output.push_str(s);
                                         }
-                                    } else if let Some(s) = text.as_str() {
-                                        output.push_str(s);
                                     }
+                                } else if let Some(s) = text.as_str() {
+                                    output.push_str(s);
                                 }
                             }
                         }

@@ -439,7 +439,7 @@ impl AcpMcpServer {
     ///
     /// OnceLock provides lock-free reads after initialization, eliminating
     /// the deadlock risk that existed with RwLock.
-    async fn create_tool_context(&self, tool_use_id: Option<&str>) -> ToolContext {
+    fn create_tool_context(&self, tool_use_id: Option<&str>) -> ToolContext {
         // OnceLock provides lock-free read after initialization
         let cwd = self.cwd.get().expect("cwd not initialized").clone();
 
@@ -527,7 +527,7 @@ impl AcpMcpServer {
         );
 
         // CRITICAL: Create context with lock-free OnceLock access
-        let context = self.create_tool_context(tool_use_id).await;
+        let context = self.create_tool_context(tool_use_id);
 
         tracing::debug!("Tool context created, calling tool execution");
 
@@ -914,7 +914,8 @@ impl AcpMcpServer {
         };
 
         // Read stderr in a task
-        let stderr_task = stderr.map(|stderr| tokio::spawn(async move {
+        let stderr_task = stderr.map(|stderr| {
+            tokio::spawn(async move {
                 let reader = BufReader::new(stderr);
                 let mut lines = reader.lines();
                 let mut collected = String::new();
@@ -924,22 +925,23 @@ impl AcpMcpServer {
                     collected.push('\n');
                 }
                 collected
-            }));
+            })
+        });
 
         // Wait for command with timeout
         let timeout_duration = std::time::Duration::from_millis(timeout_ms);
         let wait_result = tokio::time::timeout(timeout_duration, child.wait()).await;
 
         // Collect outputs
-        if let Some(task) = stdout_task {
-            if let Ok(out) = task.await {
-                output = out;
-            }
+        if let Some(task) = stdout_task
+            && let Ok(out) = task.await
+        {
+            output = out;
         }
-        if let Some(task) = stderr_task {
-            if let Ok(err) = task.await {
-                stderr_output = err;
-            }
+        if let Some(task) = stderr_task
+            && let Ok(err) = task.await
+        {
+            stderr_output = err;
         }
 
         // Combine output
@@ -1809,13 +1811,15 @@ mod tests {
         let barrier1 = barrier.clone();
         let handle1 = tokio::spawn(async move {
             barrier1.wait().await;
-            drop(server1
-                .execute_tool(
-                    "Read",
-                    serde_json::json!({"file_path": "/tmp/test.txt"}),
-                    Some("tool-1"),
-                )
-                .await);
+            drop(
+                server1
+                    .execute_tool(
+                        "Read",
+                        serde_json::json!({"file_path": "/tmp/test.txt"}),
+                        Some("tool-1"),
+                    )
+                    .await,
+            );
         });
 
         // Task 2: Execute Bash tool (uses execute_bash_tool)
@@ -1823,13 +1827,15 @@ mod tests {
         let barrier2 = barrier.clone();
         let handle2 = tokio::spawn(async move {
             barrier2.wait().await;
-            drop(server2
-                .execute_tool(
-                    "Bash",
-                    serde_json::json!({"command": "echo test"}),
-                    Some("tool-2"),
-                )
-                .await);
+            drop(
+                server2
+                    .execute_tool(
+                        "Bash",
+                        serde_json::json!({"command": "echo test"}),
+                        Some("tool-2"),
+                    )
+                    .await,
+            );
         });
 
         // Task 3: Another Read tool
@@ -1837,13 +1843,15 @@ mod tests {
         let barrier3 = barrier.clone();
         let handle3 = tokio::spawn(async move {
             barrier3.wait().await;
-            drop(server3
-                .execute_tool(
-                    "Read",
-                    serde_json::json!({"file_path": "/tmp/test.txt"}),
-                    Some("tool-3"),
-                )
-                .await);
+            drop(
+                server3
+                    .execute_tool(
+                        "Read",
+                        serde_json::json!({"file_path": "/tmp/test.txt"}),
+                        Some("tool-3"),
+                    )
+                    .await,
+            );
         });
 
         handles.push(handle1);

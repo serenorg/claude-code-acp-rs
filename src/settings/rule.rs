@@ -163,12 +163,13 @@ impl ParsedRule {
         let mut parsed = Self::parse(rule);
 
         // Compile glob for file-related tools
-        if let Some(ref arg) = parsed.argument {
-            if is_file_tool(&parsed.tool_name) && !parsed.is_wildcard {
-                let normalized = normalize_path(arg, cwd);
-                if let Ok(glob) = Glob::new(&normalized) {
-                    parsed.glob_matcher = Some(glob.compile_matcher());
-                }
+        if let Some(ref arg) = parsed.argument
+            && is_file_tool(&parsed.tool_name)
+            && !parsed.is_wildcard
+        {
+            let normalized = normalize_path(arg, cwd);
+            if let Ok(glob) = Glob::new(&normalized) {
+                parsed.glob_matcher = Some(glob.compile_matcher());
             }
         }
 
@@ -216,10 +217,10 @@ impl ParsedRule {
 
         // Check if this is an external MCP tool and get its friendly name
         // This allows rules like "deny: [WebFetch]" to match "mcp__web-fetch__webReader"
-        if let Some(friendly_name) = ExternalMcpManager::get_friendly_tool_name(tool_name) {
-            if self.tool_name == friendly_name {
-                return true;
-            }
+        if let Some(friendly_name) = ExternalMcpManager::get_friendly_tool_name(tool_name)
+            && self.tool_name == friendly_name
+        {
+            return true;
         }
 
         // Tool group matching

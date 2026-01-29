@@ -58,17 +58,20 @@ pub fn create_post_tool_use_hook(callback_registry: Arc<HookCallbackRegistry>) -
                     let start_time = Instant::now();
 
                     // Only handle PostToolUse events
-                    let (tool_name, tool_input, tool_response) = if let HookInput::PostToolUse(post_tool) = &input { (
-                        post_tool.tool_name.clone(),
-                        post_tool.tool_input.clone(),
-                        post_tool.tool_response.clone(),
-                    ) } else {
-                        tracing::debug!("Ignoring non-PostToolUse event");
-                        return HookJsonOutput::Sync(SyncHookJsonOutput {
-                            continue_: Some(true),
-                            ..Default::default()
-                        });
-                    };
+                    let (tool_name, tool_input, tool_response) =
+                        if let HookInput::PostToolUse(post_tool) = &input {
+                            (
+                                post_tool.tool_name.clone(),
+                                post_tool.tool_input.clone(),
+                                post_tool.tool_response.clone(),
+                            )
+                        } else {
+                            tracing::debug!("Ignoring non-PostToolUse event");
+                            return HookJsonOutput::Sync(SyncHookJsonOutput {
+                                continue_: Some(true),
+                                ..Default::default()
+                            });
+                        };
 
                     // Get response preview for logging
                     let response_preview = tool_response

@@ -1,76 +1,76 @@
-# Claude Code ACP Agent (Rust) 技术设计文档
+# Claude Code ACP Agent (Rust) Technical Design
 
-## 1. 概述
+## 1. Overview
 
-### 1.1 项目目标
+### 1.1 Project goal
 
-基于 Rust 语言实现 ACP (Agent Client Protocol) 协议的 Claude Code Agent，使任何 ACP 兼容的编辑器（如 Zed）都能使用 Claude Code 的能力。
+Implement a Claude Code Agent in Rust that speaks ACP (Agent Client Protocol) so that any ACP-compatible editor (e.g. Zed) can use Claude Code.
 
-### 1.2 参考项目
+### 1.2 Reference projects
 
-| 项目 | 位置 | 用途 |
-|-----|------|-----|
-| claude-code-acp (TypeScript) | `vendors/claude-code-acp` | 主要参考实现 |
-| acp-rust-sdk (SACP) | `vendors/acp-rust-sdk` | ACP 协议 Rust SDK |
-| claude-agent-sdk-rs | `vendors/claude-agent-sdk-rs` | Claude Code Rust SDK |
-| agent-client-protocol | `vendors/agent-client-protocol` | ACP 协议 Schema 定义 |
+| Project | Location | Purpose |
+|--------|----------|---------|
+| claude-code-acp (TypeScript) | `vendors/claude-code-acp` | Primary reference implementation |
+| acp-rust-sdk (SACP) | `vendors/acp-rust-sdk` | ACP protocol Rust SDK |
+| claude-agent-sdk-rs | `vendors/claude-agent-sdk-rs` | Claude Code SDK for Rust |
+| agent-client-protocol | `vendors/agent-client-protocol` | ACP schema definitions |
 
-### 1.3 设计原则
+### 1.3 Design principles
 
 - Rust Edition 2024
-- 使用 tokio 作为异步运行时
-- 遵守 SOLID 原则
-- 遵守 "Fail Fast" 原则
-- 使用 dashmap 处理并发 Map 操作
-- **单一 Crate 结构**: 项目作为单一 crate 发布到 crates.io，便于用户使用
-- **依赖统一管理**: 根目录 Cargo.toml 使用 `[workspace.dependencies]` 统一管理依赖版本
+- Use `tokio` as the async runtime
+- Follow SOLID principles
+- Follow "Fail Fast" principles
+- Use `dashmap` for concurrent map operations
+- **Single-crate structure**: publish as a single crate on crates.io for easy consumption
+- **Centralized dependency management**: use `[workspace.dependencies]` in the root Cargo.toml to manage dependency versions
 
-### 1.4 业务要求
+### 1.4 Requirements
 
-#### 1.4.1 环境变量配置
+#### 1.4.1 Environment variable configuration
 
-支持通过环境变量配置大模型，方便接入国内大模型服务：
+Support configuring the model via environment variables to make it easy to use alternative endpoints (e.g. domestic proxies):
 
-| 环境变量 | 说明 | 必填 |
-|---------|------|------|
-| `ANTHROPIC_BASE_URL` | API 基础 URL | 否 |
-| `ANTHROPIC_AUTH_TOKEN` | 认证 Token | 否 |
-| `ANTHROPIC_MODEL` | 主模型名称 | 否 |
-| `ANTHROPIC_SMALL_FAST_MODEL` | 快速小模型名称 | 否 |
+| Environment variable | Description | Required |
+|---------------------|-------------|----------|
+| `ANTHROPIC_BASE_URL` | API base URL | No |
+| `ANTHROPIC_AUTH_TOKEN` | Auth token | No |
+| `ANTHROPIC_MODEL` | Primary model name | No |
+| `ANTHROPIC_SMALL_FAST_MODEL` | Small/fast model name | No |
 
-#### 1.4.2 Token 用量统计
+#### 1.4.2 Token usage accounting
 
-- 从 `ResultMessage.usage` 获取累计 Token 用量
-- 从 `ResultMessage.total_cost_usd` 获取总费用
-- 从 `AssistantMessage.message.usage` 获取单次调用用量
-- 在会话结束时汇总统计信息
+- Read cumulative token usage from `ResultMessage.usage`
+- Read total cost from `ResultMessage.total_cost_usd`
+- Read per-call usage from `AssistantMessage.message.usage`
+- Aggregate usage statistics at session end
 
-#### 1.4.3 MCP 库选择
+#### 1.4.3 MCP library choice
 
-- 使用 `rmcp` 作为 MCP 协议实现库（替代 sacp-rmcp）
-- 参考 `vendors/acp-rust-sdk/src/sacp-rmcp` 的集成方式
+- Use `rmcp` as the MCP protocol implementation (instead of sacp-rmcp)
+- Reference the integration style in `vendors/acp-rust-sdk/src/sacp-rmcp`
 
-#### 1.4.4 Meta 字段支持
+#### 1.4.4 Meta field support
 
-ACP 协议的 `new_session` 和 `load_session` 请求中，`_meta` 字段用于传递额外配置信息：
+In ACP `new_session` and `load_session` requests, the `_meta` field carries additional configuration:
 
-**1. 系统提示词 (systemPrompt)**
+**1. System prompt (systemPrompt)**
 
-允许客户端通过 meta 字段追加系统提示词：
+Allow clients to append or replace the system prompt via meta:
 
 ```rust
-/// Meta 中的系统提示词结构
-/// meta._meta.systemPrompt.append = "自定义系统提示词"
+/// System prompt structure in meta
+/// meta._meta.systemPrompt.append = "custom system prompt"
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SystemPromptMeta {
-    /// 追加到系统提示词末尾的内容
+    /// Content appended to the end of the system prompt
     pub append: Option<String>,
-    /// 替换整个系统提示词（优先级高于 append）
+    /// Replace the entire system prompt (higher priority than append)
     pub replace: Option<String>,
 }
 
 impl SystemPromptMeta {
-    /// 从 meta JSON 解析系统提示词配置
+    /// Parse system prompt configuration from meta JSON
     pub fn from_meta(meta: &serde_json::Value) -> Option<Self> {
         meta.get("systemPrompt")
             .and_then(|v| serde_json::from_value(v.clone()).ok())
@@ -78,12 +78,12 @@ impl SystemPromptMeta {
 }
 ```
 
-**2. 恢复会话 (resume session_id)**
+**2. Resume session (resume session_id)**
 
-允许客户端恢复之前的会话：
+Allow clients to resume a previous session:
 
 ```rust
-/// Meta 中的 Claude Code 选项结构
+/// Claude Code options structure in meta
 /// meta._meta.claudeCode.options.resume = "session-uuid"
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ClaudeCodeMeta {
@@ -92,39 +92,39 @@ pub struct ClaudeCodeMeta {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ClaudeCodeOptions {
-    /// 要恢复的会话 ID
+    /// Session ID to resume
     pub resume: Option<String>,
 }
 
 impl ClaudeCodeMeta {
-    /// 从 meta JSON 解析 Claude Code 配置
+    /// Parse Claude Code configuration from meta JSON
     pub fn from_meta(meta: &serde_json::Value) -> Option<Self> {
         meta.get("claudeCode")
             .and_then(|v| serde_json::from_value(v.clone()).ok())
     }
 
-    /// 获取要恢复的会话 ID
+    /// Get the session ID to resume
     pub fn get_resume_session_id(&self) -> Option<&str> {
         self.options.as_ref()?.resume.as_deref()
     }
 }
 ```
 
-**3. Meta 解析器**
+**3. Meta parser**
 
-统一的 meta 字段解析接口：
+Unified meta parsing:
 
 ```rust
-/// 新会话请求的 Meta 配置
+/// New session meta configuration
 pub struct NewSessionMeta {
-    /// 系统提示词配置
+    /// System prompt configuration
     pub system_prompt: Option<SystemPromptMeta>,
-    /// Claude Code 特定配置
+    /// Claude Code-specific configuration
     pub claude_code: Option<ClaudeCodeMeta>,
 }
 
 impl NewSessionMeta {
-    /// 从 ACP 请求的 _meta 字段解析
+    /// Parse from the ACP request _meta field
     pub fn from_request_meta(meta: Option<&serde_json::Value>) -> Self {
         let meta = match meta {
             Some(m) => m,
@@ -137,12 +137,12 @@ impl NewSessionMeta {
         }
     }
 
-    /// 获取要追加的系统提示词
+    /// Get the system prompt append
     pub fn get_system_prompt_append(&self) -> Option<&str> {
         self.system_prompt.as_ref()?.append.as_deref()
     }
 
-    /// 获取要恢复的会话 ID
+    /// Get the session ID to resume
     pub fn get_resume_session_id(&self) -> Option<&str> {
         self.claude_code.as_ref()?.get_resume_session_id()
     }
@@ -158,41 +158,41 @@ impl Default for NewSessionMeta {
 }
 ```
 
-### 1.5 Claude SDK 集成概要
+### 1.5 Claude SDK integration summary
 
-基于 `claude-agent-sdk-rs` 库，我们使用以下核心接口：
+Based on `claude-agent-sdk-rs`, we will use these core interfaces:
 
-#### 1.5.1 核心 API 选择
+#### 1.5.1 Core API selection
 
-| 场景 | 推荐 API | 说明 |
-|------|---------|------|
-| 会话管理 | `ClaudeClient` | 支持双向通信、动态控制、多会话 |
-| 一次性查询 | `query()` / `query_stream()` | 简单场景使用 |
-| 权限控制 | `can_use_tool` 回调 | 拦截工具调用进行权限判断 |
-| 工具钩子 | `Hooks` 系统 | PreToolUse/PostToolUse 等钩子 |
-| 内置工具 | `tool!` 宏 + `McpServerConfig::Sdk` | 创建内置 MCP 工具 |
+| Scenario | Recommended API | Notes |
+|----------|------------------|-------|
+| Session management | `ClaudeClient` | Bidirectional streaming, dynamic control, multi-session |
+| One-off queries | `query()` / `query_stream()` | For simple scenarios |
+| Permission control | `can_use_tool` callback | Intercept tool calls to decide permissions |
+| Tool hooks | `Hooks` | PreToolUse/PostToolUse hooks |
+| Built-in tools | `tool!` macro + `McpServerConfig::Sdk` | Define built-in MCP tools |
 
-#### 1.5.2 关键类型映射
+#### 1.5.2 Key type mapping
 
-| SDK 类型 | ACP 用途 |
-|---------|---------|
-| `ClaudeClient` | 每个 ACP Session 持有一个实例 |
-| `ClaudeAgentOptions` | 会话创建时的配置 |
-| `Message` | 转换为 ACP SessionNotification |
-| `ResultMessage` | 获取 Token 用量和费用 |
-| `PermissionMode` | 映射 ACP 的 session mode |
-| `HookInput::PreToolUse` | 用于权限请求拦截 |
+| SDK type | ACP usage |
+|---------|-----------|
+| `ClaudeClient` | One instance per ACP session |
+| `ClaudeAgentOptions` | Session creation configuration |
+| `Message` | Convert into ACP SessionNotification |
+| `ResultMessage` | Token usage and cost |
+| `PermissionMode` | Map to ACP session mode |
+| `HookInput::PreToolUse` | Intercept permissions via hooks |
 
 ---
 
-## 2. 高层架构设计
+## 2. High-level architecture
 
-### 2.1 整体架构图
+### 2.1 Overall architecture diagram
 
 ```mermaid
 graph TB
     subgraph "Editor/Client Layer"
-        Editor["Editor (Zed等)"]
+        Editor["Editor (e.g. Zed)"]
     end
 
     subgraph "ACP Transport Layer"
@@ -201,17 +201,17 @@ graph TB
     end
 
     subgraph "Claude Code ACP Agent"
-        AgentCore["ClaudeAcpAgent<br/>(核心实现)"]
-        SessionManager["SessionManager<br/>(会话管理)"]
-        PermissionHandler["PermissionHandler<br/>(权限处理)"]
-        ToolConverter["ToolConverter<br/>(工具转换)"]
-        NotificationBuilder["NotificationBuilder<br/>(通知构建)"]
+        AgentCore["ClaudeAcpAgent<br/>(core implementation)"]
+        SessionManager["SessionManager<br/>(session management)"]
+        PermissionHandler["PermissionHandler<br/>(permission handling)"]
+        ToolConverter["ToolConverter<br/>(tool conversion)"]
+        NotificationBuilder["NotificationBuilder<br/>(notification building)"]
     end
 
     subgraph "Claude Code SDK Layer"
         ClaudeClient["ClaudeClient"]
-        QueryStream["QueryStream<br/>(消息流)"]
-        HooksSystem["Hooks System<br/>(钩子系统)"]
+        QueryStream["QueryStream<br/>(message stream)"]
+        HooksSystem["Hooks System<br/>(hooks)"]
     end
 
     subgraph "MCP Server Layer"
@@ -246,7 +246,7 @@ graph TB
     ClaudeCodeCLI --> AnthropicAPI
 ```
 
-### 2.2 消息流程图
+### 2.2 Message flow
 
 ```mermaid
 sequenceDiagram
@@ -256,18 +256,18 @@ sequenceDiagram
     participant Q as ClaudeClient/Query
     participant CLI as Claude Code CLI
 
-    Note over C,CLI: 初始化阶段
+    Note over C,CLI: Initialization
     C->>A: initialize()
     A-->>C: InitializeResponse (capabilities)
 
-    Note over C,CLI: 创建会话
+    Note over C,CLI: Create session
     C->>A: new_session(cwd, mcpServers)
     A->>S: create_session()
     S->>Q: query() with options
     Q->>CLI: spawn subprocess
     A-->>C: NewSessionResponse (sessionId, modes)
 
-    Note over C,CLI: 执行 Prompt
+    Note over C,CLI: Run prompt
     C->>A: prompt(sessionId, content)
     A->>S: get_session(sessionId)
     S->>Q: push user message
@@ -300,7 +300,7 @@ sequenceDiagram
     A-->>C: PromptResponse (stopReason)
 ```
 
-### 2.3 组件交互图
+### 2.3 Component interaction
 
 ```mermaid
 graph LR
@@ -342,97 +342,97 @@ graph LR
 
 ---
 
-## 3. 核心模块设计
+## 3. Core module design
 
-### 3.1 项目结构
+### 3.1 Project layout
 
-项目作为单一 crate 发布到 crates.io，内部通过模块组织代码。
+This project is published as a single crate on crates.io. Internally, code is organized into modules.
 
 ```
 claude-code-acp-rs/
-├── Cargo.toml                    # 主配置（含 workspace.dependencies）
+├── Cargo.toml                    # main config (includes workspace.dependencies)
 ├── Cargo.lock
 ├── src/
-│   ├── main.rs                   # CLI 入口
-│   ├── lib.rs                    # 库入口，导出公共 API
+│   ├── main.rs                   # CLI entry
+│   ├── lib.rs                    # library entry, exports public API
 │   │
-│   ├── agent/                    # Agent 核心模块
+│   ├── agent/                    # agent core module
 │   │   ├── mod.rs
-│   │   ├── core.rs               # ClaudeAcpAgent 主结构
-│   │   ├── handlers.rs           # ACP 请求处理器
-│   │   └── runner.rs             # 服务启动器
+│   │   ├── core.rs               # ClaudeAcpAgent
+│   │   ├── handlers.rs           # ACP request handlers
+│   │   └── runner.rs             # service bootstrap
 │   │
-│   ├── session/                  # 会话管理模块
+│   ├── session/                  # session management
 │   │   ├── mod.rs
 │   │   ├── manager.rs            # SessionManager
-│   │   ├── state.rs              # Session 状态
-│   │   ├── permission.rs         # 权限处理
-│   │   └── usage.rs              # Token 用量统计
+│   │   ├── state.rs              # session state
+│   │   ├── permission.rs         # permission handling
+│   │   └── usage.rs              # token usage accounting
 │   │
-│   ├── converter/                # 消息转换模块
+│   ├── converter/                # message conversion
 │   │   ├── mod.rs
-│   │   ├── prompt.rs             # ACP → Claude SDK 转换
-│   │   ├── notification.rs       # Claude SDK → ACP 转换
-│   │   └── tool.rs               # 工具信息转换
+│   │   ├── prompt.rs             # ACP → Claude SDK
+│   │   ├── notification.rs       # Claude SDK → ACP
+│   │   └── tool.rs               # tool metadata conversion
 │   │
-│   ├── mcp/                      # 内置 MCP Server (使用 rmcp)
+│   ├── mcp/                      # built-in MCP server (rmcp)
 │   │   ├── mod.rs
-│   │   ├── server.rs             # MCP Server 实现
+│   │   ├── server.rs             # MCP server implementation
 │   │   └── tools/
 │   │       ├── mod.rs
-│   │       ├── read.rs           # Read 工具
-│   │       ├── write.rs          # Write 工具
-│   │       ├── edit.rs           # Edit 工具
-│   │       └── bash.rs           # Bash 工具
+│   │       ├── read.rs           # Read tool
+│   │       ├── write.rs          # Write tool
+│   │       ├── edit.rs           # Edit tool
+│   │       └── bash.rs           # Bash tool
 │   │
-│   ├── settings/                 # 设置管理模块
+│   ├── settings/                 # settings management
 │   │   ├── mod.rs
 │   │   └── manager.rs            # SettingsManager
 │   │
-│   ├── types/                    # 公共类型定义
+│   ├── types/                    # shared types
 │   │   ├── mod.rs
-│   │   ├── config.rs             # AgentConfig, 环境变量配置
-│   │   ├── meta.rs               # NewSessionMeta, SystemPromptMeta 等
-│   │   ├── session.rs            # TokenUsage, SessionStats 等
-│   │   ├── tool.rs               # ToolInfo, ToolKind 等
-│   │   ├── notification.rs       # 通知相关类型
+│   │   ├── config.rs             # AgentConfig, env var config
+│   │   ├── meta.rs               # NewSessionMeta, SystemPromptMeta, etc.
+│   │   ├── session.rs            # TokenUsage, SessionStats, etc.
+│   │   ├── tool.rs               # ToolInfo, ToolKind, etc.
+│   │   ├── notification.rs       # notification types
 │   │   └── error.rs              # AgentError
 │   │
-│   └── util/                     # 工具函数
+│   └── util/                     # utilities
 │       └── mod.rs
 │
-├── vendors/                      # 依赖的外部项目 (git submodule)
+├── vendors/                      # external dependencies (git submodules)
 │   ├── acp-rust-sdk/
 │   ├── claude-agent-sdk-rs/
 │   ├── claude-code-acp/
 │   └── agent-client-protocol/
 │
-└── specs/                        # 设计文档
+└── specs/                        # design docs
     └── claude-code-acp/
 ```
 
-### 3.2 模块依赖关系图
+### 3.2 Module dependency diagram
 
 ```mermaid
 graph TB
     subgraph "claude-code-acp-rs crate"
-        Main[main.rs<br/>CLI 入口]
-        Lib[lib.rs<br/>库入口]
+        Main["main.rs<br/>CLI entry"]
+        Lib["lib.rs<br/>library entry"]
 
         subgraph "Core Modules"
-            Agent[agent/<br/>核心 Agent]
-            Session[session/<br/>会话管理]
-            Converter[converter/<br/>消息转换]
-            MCP[mcp/<br/>MCP Server]
-            Settings[settings/<br/>设置管理]
-            Types[types/<br/>公共类型]
+            Agent["agent/<br/>core agent"]
+            Session["session/<br/>session management"]
+            Converter["converter/<br/>message conversion"]
+            MCP["mcp/<br/>MCP server"]
+            Settings["settings/<br/>settings mgmt"]
+            Types["types/<br/>shared types"]
         end
     end
 
     subgraph "Vendor Dependencies"
-        SACP[sacp<br/>ACP SDK]
-        ClaudeSDK[claude-agent-sdk-rs<br/>Claude SDK]
-        RMCP[rmcp<br/>MCP 库]
+        SACP["sacp<br/>ACP SDK"]
+        ClaudeSDK["claude-agent-sdk-rs<br/>Claude SDK"]
+        RMCP["rmcp<br/>MCP library"]
     end
 
     Main --> Lib
@@ -457,26 +457,26 @@ graph TB
     Settings --> Types
 ```
 
-### 3.3 模块职责
+### 3.3 Module responsibilities
 
-| 模块 | 职责 | 主要依赖 |
-|------|------|----------|
-| `agent` | Agent 核心逻辑、ACP 请求处理、服务启动 | sacp, claude-agent-sdk-rs, session, converter, mcp |
-| `session` | 会话创建、管理、状态维护、权限处理、Token 用量统计 | claude-agent-sdk-rs, types |
-| `converter` | ACP ↔ Claude SDK 消息格式转换 | types |
-| `mcp` | 内置 MCP Server 及工具实现 | rmcp, types, session |
-| `settings` | 用户设置读取与管理 | types |
-| `types` | 公共类型、错误定义、配置结构、Meta 解析、常量 | serde, thiserror |
+| Module | Responsibility | Key dependencies |
+|--------|----------------|------------------|
+| `agent` | Core agent logic, ACP request handling, service bootstrap | sacp, claude-agent-sdk-rs, session, converter, mcp |
+| `session` | Session creation/management/state, permission handling, token usage accounting | claude-agent-sdk-rs, types |
+| `converter` | ACP ↔ Claude SDK message format conversion | types |
+| `mcp` | Built-in MCP server and tools | rmcp, types, session |
+| `settings` | User settings loading and management | types |
+| `types` | Shared types, errors, configs, meta parsing, constants | serde, thiserror |
 
-### 3.4 公共 API 导出 (lib.rs)
+### 3.4 Public API exports (lib.rs)
 
 ```rust
 //! Claude Code ACP Agent
 //!
-//! 基于 Rust 实现的 ACP 协议 Claude Code Agent，
-//! 使任何 ACP 兼容的编辑器能够使用 Claude Code 的能力。
+//! A Rust implementation of a Claude Code agent that speaks ACP,
+//! enabling any ACP-compatible editor to use Claude Code.
 //!
-//! ## 快速开始
+//! ## Quick start
 //!
 //! ```no_run
 //! use claude_code_acp::run_acp;
@@ -487,12 +487,12 @@ graph TB
 //! }
 //! ```
 //!
-//! ## 环境变量配置
+//! ## Environment variables
 //!
-//! - `ANTHROPIC_BASE_URL`: API 基础 URL
-//! - `ANTHROPIC_AUTH_TOKEN`: 认证 Token
-//! - `ANTHROPIC_MODEL`: 主模型名称
-//! - `ANTHROPIC_SMALL_FAST_MODEL`: 快速小模型名称
+//! - `ANTHROPIC_BASE_URL`: API base URL
+//! - `ANTHROPIC_AUTH_TOKEN`: auth token
+//! - `ANTHROPIC_MODEL`: primary model name
+//! - `ANTHROPIC_SMALL_FAST_MODEL`: small/fast model name
 
 pub mod agent;
 pub mod converter;
@@ -508,32 +508,32 @@ pub use types::{AgentConfig, AgentError, NewSessionMeta};
 
 ---
 
-## 4. 核心接口设计
+## 4. Core interface design
 
-### 4.1 Agent Trait 实现
+### 4.1 Agent trait
 
-Agent 需要实现 ACP 协议定义的所有必需方法：
+The agent must implement all required ACP protocol methods:
 
 ```rust
-/// ACP Agent 核心接口
-/// 参考: sacp::schema 中的请求/响应类型
+/// Core ACP agent interface
+/// Reference: request/response types in sacp::schema
 pub trait AcpAgentHandler {
-    /// 初始化 Agent，返回能力信息
+    /// Initialize the agent and return capabilities
     async fn initialize(&self, request: InitializeRequest) -> Result<InitializeResponse>;
 
-    /// 认证（可选实现）
+    /// Authenticate (optional)
     async fn authenticate(&self, request: AuthenticateRequest) -> Result<AuthenticateResponse>;
 
-    /// 创建新会话
+    /// Create a new session
     async fn new_session(&self, request: NewSessionRequest) -> Result<NewSessionResponse>;
 
-    /// 执行 prompt
+    /// Execute a prompt
     async fn prompt(&self, request: PromptRequest) -> Result<PromptResponse>;
 
-    /// 取消当前操作
+    /// Cancel current operation
     async fn cancel(&self, notification: CancelNotification) -> Result<()>;
 
-    /// 设置会话模式
+    /// Set session mode
     async fn set_session_mode(&self, request: SetSessionModeRequest) -> Result<SetSessionModeResponse>;
 
     // Unstable APIs
@@ -542,24 +542,24 @@ pub trait AcpAgentHandler {
 }
 ```
 
-### 4.2 环境变量配置接口
+### 4.2 Environment variable config
 
 ```rust
-/// Agent 配置，从环境变量读取
+/// Agent configuration loaded from environment variables
 #[derive(Debug, Clone, Default)]
 pub struct AgentConfig {
-    /// Anthropic API 基础 URL
+    /// Anthropic API base URL
     pub base_url: Option<String>,
-    /// 认证 Token
+    /// Auth token
     pub auth_token: Option<String>,
-    /// 主模型名称
+    /// Primary model
     pub model: Option<String>,
-    /// 快速小模型名称（用于 fallback）
+    /// Small/fast model (fallback)
     pub small_fast_model: Option<String>,
 }
 
 impl AgentConfig {
-    /// 从环境变量加载配置
+    /// Load from environment variables
     pub fn from_env() -> Self {
         Self {
             base_url: std::env::var("ANTHROPIC_BASE_URL").ok(),
@@ -569,8 +569,8 @@ impl AgentConfig {
         }
     }
 
-    /// 应用配置到 ClaudeAgentOptions
-    /// 注意：base_url 和 auth_token 需要通过环境变量传递给 Claude Code CLI
+    /// Apply config to ClaudeAgentOptions
+    /// Note: base_url and auth_token must be passed to the Claude Code CLI via env vars
     pub fn apply_to_options(&self, builder: ClaudeAgentOptionsBuilder) -> ClaudeAgentOptionsBuilder {
         let mut b = builder;
         if let Some(ref model) = self.model {
@@ -579,7 +579,7 @@ impl AgentConfig {
         if let Some(ref fallback) = self.small_fast_model {
             b = b.fallback_model(fallback.clone());
         }
-        // base_url 和 auth_token 通过 env 选项传递
+        // Pass base_url and auth_token via env options
         if self.base_url.is_some() || self.auth_token.is_some() {
             let mut env = HashMap::new();
             if let Some(ref url) = self.base_url {
@@ -595,26 +595,26 @@ impl AgentConfig {
 }
 ```
 
-### 4.3 Token 用量统计接口
+### 4.3 Token usage accounting
 
 ```rust
 use claude_agent_sdk_rs::{Message, ResultMessage, AssistantMessage};
 
-/// Token 使用统计（基于 SDK 的 usage 字段）
+/// Token usage accounting (based on the SDK usage field)
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct TokenUsage {
-    /// 输入 Token 数
+    /// Input token count
     pub input_tokens: u64,
-    /// 输出 Token 数
+    /// Output token count
     pub output_tokens: u64,
-    /// 缓存读取 Token 数
+    /// Cache read input token count
     pub cache_read_input_tokens: Option<u64>,
-    /// 缓存创建 Token 数
+    /// Cache creation input token count
     pub cache_creation_input_tokens: Option<u64>,
 }
 
 impl TokenUsage {
-    /// 从 SDK 的 usage JSON 解析
+    /// Parse from the SDK usage JSON
     pub fn from_sdk_usage(usage: &serde_json::Value) -> Self {
         Self {
             input_tokens: usage["input_tokens"].as_u64().unwrap_or(0),
@@ -624,7 +624,7 @@ impl TokenUsage {
         }
     }
 
-    /// 累加使用量
+    /// Add usage
     pub fn add(&mut self, other: &TokenUsage) {
         self.input_tokens += other.input_tokens;
         self.output_tokens += other.output_tokens;
@@ -636,18 +636,18 @@ impl TokenUsage {
         }
     }
 
-    /// 总 Token 数
+    /// Total token count
     pub fn total(&self) -> u64 {
         self.input_tokens + self.output_tokens
     }
 }
 
-/// 会话用量追踪器
+/// Per-session usage tracker
 pub struct UsageTracker {
-    /// 累计用量
+    /// Total usage
     total_usage: RwLock<TokenUsage>,
-    /// 总费用 (USD)
-    total_cost_usd: AtomicU64,  // 存储 f64 的 bits
+    /// Total cost (USD)
+    total_cost_usd: AtomicU64,  // stores f64 bits
 }
 
 impl UsageTracker {
@@ -658,7 +658,7 @@ impl UsageTracker {
         }
     }
 
-    /// 从 SDK ResultMessage 更新用量（在 prompt 结束时调用）
+    /// Update from an SDK ResultMessage (called when a prompt finishes)
     pub fn update_from_result(&self, result: &ResultMessage) {
         if let Some(ref usage) = result.usage {
             let mut total = self.total_usage.write().unwrap();
@@ -669,21 +669,21 @@ impl UsageTracker {
         }
     }
 
-    /// 获取累计用量
+    /// Get total usage
     pub fn get_usage(&self) -> TokenUsage {
         self.total_usage.read().unwrap().clone()
     }
 
-    /// 获取总费用
+    /// Get total cost
     pub fn get_cost_usd(&self) -> f64 {
         f64::from_bits(self.total_cost_usd.load(Ordering::SeqCst))
     }
 }
 ```
 
-### 4.4 Session 管理接口
+### 4.4 Session management
 
-使用 `ClaudeClient` 作为核心通信接口：
+Use `ClaudeClient` as the core communication interface:
 
 ```rust
 use claude_agent_sdk_rs::{
@@ -693,49 +693,49 @@ use claude_agent_sdk_rs::{
 use futures::StreamExt;
 use tokio::sync::mpsc;
 
-/// 会话状态 - 每个 ACP Session 持有一个 ClaudeClient 实例
+/// Session state - each ACP session owns a ClaudeClient instance
 pub struct Session {
-    /// Claude SDK 的 Client 实例（支持双向流式通信）
+    /// Claude SDK client (bidirectional streaming)
     pub client: ClaudeClient,
-    /// 是否已取消
+    /// Cancelled flag
     pub cancelled: AtomicBool,
-    /// 当前权限模式
+    /// Current permission mode
     pub permission_mode: RwLock<SdkPermissionMode>,
-    /// 设置管理器
+    /// Settings manager
     pub settings_manager: SettingsManager,
-    /// Token 用量追踪器
+    /// Token usage tracker
     pub usage_tracker: UsageTracker,
-    /// 会话 ID
+    /// Session ID
     pub session_id: String,
-    /// 工作目录
+    /// Working directory
     pub cwd: PathBuf,
-    /// 通知转换器
+    /// Notification converter
     pub converter: NotificationConverter,
 }
 
 impl Session {
-    /// 创建新会话
+    /// Create a new session
     pub async fn new(
         session_id: String,
         cwd: PathBuf,
         config: &AgentConfig,
         permission_handler: Arc<PermissionHandler>,
     ) -> Result<Self> {
-        // 构建 ClaudeAgentOptions
+        // Build ClaudeAgentOptions
         let mut builder = ClaudeAgentOptions::builder()
             .cwd(cwd.clone())
             .permission_mode(SdkPermissionMode::Default)
             .include_partial_messages(true);
 
-        // 应用环境变量配置 (ANTHROPIC_BASE_URL, ANTHROPIC_AUTH_TOKEN 等)
+        // Apply env config (ANTHROPIC_BASE_URL, ANTHROPIC_AUTH_TOKEN, etc.)
         builder = config.apply_to_options(builder);
 
-        // 设置权限回调
+        // Configure permission callback
         builder = builder.can_use_tool(permission_handler.create_can_use_tool_callback());
 
         let options = builder.build();
 
-        // 使用 try_new 进行早期验证
+        // Use try_new for early validation
         let mut client = ClaudeClient::try_new(options)?;
         client.connect().await?;
 
@@ -751,53 +751,52 @@ impl Session {
         })
     }
 
-    /// 发送 prompt 并返回消息流（处理直到 ResultMessage）
+    /// Send a prompt and return the message stream (until ResultMessage)
     pub async fn prompt(
         &mut self,
         content: Vec<UserContentBlock>,
     ) -> Result<impl Stream<Item = Result<Message>>> {
-        // 重置取消标志
+        // Reset cancelled flag
         self.cancelled.store(false, Ordering::SeqCst);
 
-        // 发送内容到 Claude
-        self.client.query_with_content_and_session(
-            content,
-            &self.session_id,
-        ).await?;
+        // Send content to Claude
+        self.client
+            .query_with_content_and_session(content, &self.session_id)
+            .await?;
 
-        // 返回响应流（直到 ResultMessage）
+        // Return response stream (until ResultMessage)
         Ok(self.client.receive_response())
     }
 
-    /// 发送文本 prompt
+    /// Send a text prompt
     pub async fn prompt_text(&mut self, text: &str) -> Result<impl Stream<Item = Result<Message>>> {
         self.prompt(vec![UserContentBlock::text(text)]).await
     }
 
-    /// 中断当前执行
+    /// Interrupt current execution
     pub async fn interrupt(&self) -> Result<()> {
         self.cancelled.store(true, Ordering::SeqCst);
         self.client.interrupt().await
     }
 
-    /// 设置权限模式
+    /// Set permission mode
     pub async fn set_permission_mode(&self, mode: SdkPermissionMode) -> Result<()> {
         self.client.set_permission_mode(mode).await?;
         *self.permission_mode.write().unwrap() = mode;
         Ok(())
     }
 
-    /// 设置模型
+    /// Set model
     pub async fn set_model(&self, model: Option<&str>) -> Result<()> {
         self.client.set_model(model).await
     }
 
-    /// 获取服务器信息
+    /// Get server info
     pub async fn get_server_info(&self) -> Option<serde_json::Value> {
         self.client.get_server_info().await
     }
 
-    /// 处理消息流并更新用量统计
+    /// Process the message stream and update usage statistics
     pub async fn process_response_stream(
         &self,
         notifier: &impl AcpNotifier,
@@ -807,13 +806,13 @@ impl Session {
         while let Some(result) = stream.next().await {
             let message = result?;
 
-            // 转换为 ACP 通知并发送
+            // Convert to ACP notifications and send
             let notifications = self.converter.convert_message(&message, &self.session_id);
             for notification in notifications {
                 notifier.send_notification(notification).await;
             }
 
-            // 如果是 ResultMessage，更新用量统计
+            // If ResultMessage, update usage
             if let Message::Result(result) = &message {
                 self.usage_tracker.update_from_result(result);
             }
@@ -822,21 +821,21 @@ impl Session {
         Ok(())
     }
 
-    /// 断开连接
+    /// Disconnect
     pub async fn disconnect(&mut self) -> Result<()> {
         self.client.disconnect().await
     }
 }
 
-/// 会话管理器
+/// Session manager
 pub struct SessionManager {
-    /// 使用 DashMap 实现并发安全的会话存储
+    /// Concurrent session store via DashMap
     sessions: DashMap<String, Arc<tokio::sync::RwLock<Session>>>,
-    /// 客户端能力
+    /// Client capabilities
     client_capabilities: Option<ClientCapabilities>,
-    /// Agent 配置
+    /// Agent config
     config: AgentConfig,
-    /// 权限处理器
+    /// Permission handler
     permission_handler: Arc<PermissionHandler>,
 }
 
@@ -854,29 +853,37 @@ impl SessionManager {
         self.client_capabilities = Some(caps);
     }
 
-    /// 创建新会话
-    pub async fn create_session(&self, session_id: String, cwd: PathBuf) -> Result<Arc<tokio::sync::RwLock<Session>>> {
+    /// Create a new session
+    pub async fn create_session(
+        &self,
+        session_id: String,
+        cwd: PathBuf,
+    ) -> Result<Arc<tokio::sync::RwLock<Session>>> {
         let session = Session::new(
             session_id.clone(),
             cwd,
             &self.config,
             Arc::clone(&self.permission_handler),
-        ).await?;
+        )
+        .await?;
 
         let session = Arc::new(tokio::sync::RwLock::new(session));
         self.sessions.insert(session_id, Arc::clone(&session));
         Ok(session)
     }
 
-    /// 获取会话
+    /// Get a session
     pub fn get_session(&self, session_id: &str) -> Option<Arc<tokio::sync::RwLock<Session>>> {
         self.sessions.get(session_id).map(|r| Arc::clone(r.value()))
     }
 
-    /// 移除会话
-    pub async fn remove_session(&self, session_id: &str) -> Option<Arc<tokio::sync::RwLock<Session>>> {
+    /// Remove a session
+    pub async fn remove_session(
+        &self,
+        session_id: &str,
+    ) -> Option<Arc<tokio::sync::RwLock<Session>>> {
         if let Some((_, session)) = self.sessions.remove(session_id) {
-            // 断开连接
+            // Disconnect
             let mut guard = session.write().await;
             let _ = guard.disconnect().await;
             drop(guard);
@@ -886,7 +893,7 @@ impl SessionManager {
         }
     }
 
-    /// 获取会话统计信息
+    /// Get session stats
     pub fn get_session_stats(&self) -> SessionStats {
         SessionStats {
             active_sessions: self.sessions.len(),
@@ -899,9 +906,9 @@ pub struct SessionStats {
 }
 ```
 
-### 4.5 权限处理接口
+### 4.5 Permission handling
 
-使用 `claude-agent-sdk-rs` 提供的权限类型，确保与 SDK 一致：
+Use the permission types provided by `claude-agent-sdk-rs` to stay SDK-consistent:
 
 ```rust
 use claude_agent_sdk_rs::types::{
@@ -910,34 +917,34 @@ use claude_agent_sdk_rs::types::{
     PermissionUpdateDestination, ToolPermissionContext, CanUseToolCallback,
 };
 
-// SDK 已定义的权限模式（直接使用）
+// Permission modes defined by the SDK (use directly)
 // pub enum PermissionMode {
-//     Default,           // 默认模式，每个操作都需要确认
-//     AcceptEdits,       // 自动接受文件编辑操作
-//     Plan,              // 计划模式，不执行实际操作
-//     BypassPermissions, // 绕过所有权限检查
+//     Default,           // default mode; prompt for each action
+//     AcceptEdits,       // auto-accept file edits
+//     Plan,              // planning mode; do not execute tools
+//     BypassPermissions, // bypass all permission checks
 // }
 
-/// 权限处理器 - 桥接 ACP 权限请求和 SDK 权限回调
+/// Permission handler - bridges ACP permission requests and the SDK callback
 pub struct PermissionHandler {
-    /// 待处理的权限请求
+    /// Pending permission requests
     pending_requests: DashMap<String, PendingPermissionRequest>,
-    /// ACP 客户端通知发送器
+    /// ACP client notifier
     notifier: Arc<dyn AcpNotifier>,
 }
 
-/// 待处理的权限请求
+/// Pending permission request
 pub struct PendingPermissionRequest {
     pub tool_name: String,
     pub tool_input: serde_json::Value,
     pub tool_use_id: String,
     pub suggestions: Vec<PermissionUpdate>,
-    /// 完成通道
+    /// Completion channel
     pub response_tx: oneshot::Sender<PermissionResult>,
 }
 
 impl PermissionHandler {
-    /// 创建权限回调，用于传递给 ClaudeAgentOptions
+    /// Create the permission callback to pass into ClaudeAgentOptions
     pub fn create_can_use_tool_callback(&self) -> CanUseToolCallback {
         let pending = self.pending_requests.clone();
         let notifier = self.notifier.clone();
@@ -947,25 +954,30 @@ impl PermissionHandler {
             let notifier = notifier.clone();
 
             Box::pin(async move {
-                // 生成唯一请求 ID
+                // Generate a unique request ID
                 let request_id = uuid::Uuid::new_v4().to_string();
 
-                // 创建完成通道
+                // Create completion channel
                 let (tx, rx) = oneshot::channel();
 
-                // 存储待处理请求
-                pending.insert(request_id.clone(), PendingPermissionRequest {
-                    tool_name: tool_name.clone(),
-                    tool_input: tool_input.clone(),
-                    tool_use_id: request_id.clone(),
-                    suggestions: context.suggestions,
-                    response_tx: tx,
-                });
+                // Store pending request
+                pending.insert(
+                    request_id.clone(),
+                    PendingPermissionRequest {
+                        tool_name: tool_name.clone(),
+                        tool_input: tool_input.clone(),
+                        tool_use_id: request_id.clone(),
+                        suggestions: context.suggestions,
+                        response_tx: tx,
+                    },
+                );
 
-                // 发送 ACP permission_request 通知
-                notifier.send_permission_request(&request_id, &tool_name, &tool_input).await;
+                // Send ACP permission_request notification
+                notifier
+                    .send_permission_request(&request_id, &tool_name, &tool_input)
+                    .await;
 
-                // 等待 ACP 客户端响应
+                // Wait for ACP client response
                 match rx.await {
                     Ok(result) => result,
                     Err(_) => PermissionResult::Deny(PermissionResultDeny {
@@ -977,7 +989,7 @@ impl PermissionHandler {
         })
     }
 
-    /// 处理来自 ACP 客户端的权限响应
+    /// Handle a permission response from the ACP client
     pub fn handle_permission_response(&self, request_id: &str, allowed: bool, message: Option<String>) {
         if let Some((_, request)) = self.pending_requests.remove(request_id) {
             let result = if allowed {
@@ -996,7 +1008,7 @@ impl PermissionHandler {
     }
 }
 
-/// ACP 权限模式到 SDK 模式的转换
+/// Convert ACP permission mode string to SDK mode
 pub fn acp_mode_to_sdk_mode(acp_mode: &str) -> PermissionMode {
     match acp_mode {
         "default" => PermissionMode::Default,
@@ -1007,7 +1019,7 @@ pub fn acp_mode_to_sdk_mode(acp_mode: &str) -> PermissionMode {
     }
 }
 
-/// SDK 权限模式到 ACP 模式字符串
+/// Convert SDK permission mode to ACP mode string
 pub fn sdk_mode_to_acp_mode(mode: PermissionMode) -> &'static str {
     match mode {
         PermissionMode::Default => "default",
@@ -1018,9 +1030,9 @@ pub fn sdk_mode_to_acp_mode(mode: PermissionMode) -> &'static str {
 }
 ```
 
-### 4.6 通知转换接口
+### 4.6 Notification conversion
 
-使用 SDK 的实际消息类型进行转换：
+Convert using the SDK's concrete message types:
 
 ```rust
 use claude_agent_sdk_rs::types::{
@@ -1029,9 +1041,9 @@ use claude_agent_sdk_rs::types::{
 };
 use sacp::schema::{SessionNotification, SessionUpdateNotification};
 
-/// 通知转换器 - 将 SDK 消息转换为 ACP SessionNotification
+/// Notification converter - converts SDK messages into ACP SessionNotification
 pub struct NotificationConverter {
-    /// 工具使用缓存，用于关联 tool_use 和 tool_result
+    /// Tool use cache, used to associate tool_use and tool_result
     tool_use_cache: DashMap<String, ToolUseEntry>,
 }
 
@@ -1042,29 +1054,25 @@ impl NotificationConverter {
         }
     }
 
-    /// 转换 SDK Message 为 ACP 通知列表
+    /// Convert an SDK Message into a list of ACP notifications
     pub fn convert_message(&self, message: &Message, session_id: &str) -> Vec<SessionNotification> {
         match message {
-            Message::Assistant(assistant) => {
-                self.convert_assistant_message(assistant, session_id)
-            }
-            Message::StreamEvent(event) => {
-                self.convert_stream_event(event, session_id)
-            }
-            Message::Result(result) => {
-                // ResultMessage 不直接转换为通知，而是用于更新用量统计
-                // 但可以生成 session_end 通知
+            Message::Assistant(assistant) => self.convert_assistant_message(assistant, session_id),
+            Message::StreamEvent(event) => self.convert_stream_event(event, session_id),
+            Message::Result(_result) => {
+                // ResultMessage is not directly converted to notifications; it is used to update usage.
+                // (Optionally: generate session_end notification)
                 vec![]
             }
-            Message::System(system) => {
-                // System 消息一般用于内部状态，不转换为 ACP 通知
+            Message::System(_system) => {
+                // System messages are internal and typically not converted to ACP notifications
                 vec![]
             }
             _ => vec![],
         }
     }
 
-    /// 转换 AssistantMessage
+    /// Convert AssistantMessage
     fn convert_assistant_message(
         &self,
         assistant: &AssistantMessage,
@@ -1075,43 +1083,37 @@ impl NotificationConverter {
         for block in &assistant.message.content {
             match block {
                 ContentBlock::Text(text) => {
-                    notifications.push(self.make_agent_message_notification(
-                        session_id,
-                        &text.text,
-                    ));
+                    notifications.push(self.make_agent_message_notification(session_id, &text.text));
                 }
                 ContentBlock::Thinking(thinking) => {
-                    notifications.push(self.make_agent_thought_notification(
-                        session_id,
-                        &thinking.thinking,
-                    ));
+                    notifications.push(
+                        self.make_agent_thought_notification(session_id, &thinking.thinking),
+                    );
                 }
                 ContentBlock::ToolUse(tool_use) => {
-                    // 缓存 tool_use 以便后续关联 tool_result
-                    self.tool_use_cache.insert(tool_use.id.clone(), ToolUseEntry {
-                        tool_type: ToolUseType::ToolUse,
-                        id: tool_use.id.clone(),
-                        name: tool_use.name.clone(),
-                        input: tool_use.input.clone(),
-                    });
+                    // Cache tool_use for later tool_result association
+                    self.tool_use_cache.insert(
+                        tool_use.id.clone(),
+                        ToolUseEntry {
+                            tool_type: ToolUseType::ToolUse,
+                            id: tool_use.id.clone(),
+                            name: tool_use.name.clone(),
+                            input: tool_use.input.clone(),
+                        },
+                    );
 
-                    notifications.push(self.make_tool_call_notification(
-                        session_id,
-                        tool_use,
-                    ));
+                    notifications.push(self.make_tool_call_notification(session_id, tool_use));
                 }
                 ContentBlock::ToolResult(tool_result) => {
-                    // 查找对应的 tool_use
+                    // Lookup corresponding tool_use
                     if let Some(entry) = self.tool_use_cache.get(&tool_result.tool_use_id) {
-                        notifications.push(self.make_tool_result_notification(
-                            session_id,
-                            &entry,
-                            tool_result,
-                        ));
+                        notifications.push(
+                            self.make_tool_result_notification(session_id, &entry, tool_result),
+                        );
                     }
                 }
                 ContentBlock::Image(_) => {
-                    // 图片块暂不转换为 ACP 通知
+                    // Image blocks are not converted to ACP notifications (for now)
                 }
             }
         }
@@ -1119,43 +1121,35 @@ impl NotificationConverter {
         notifications
     }
 
-    /// 转换 StreamEvent (用于增量流式更新)
-    fn convert_stream_event(
-        &self,
-        event: &StreamEvent,
-        session_id: &str,
-    ) -> Vec<SessionNotification> {
-        // StreamEvent.event 是 serde_json::Value，需要解析具体类型
+    /// Convert StreamEvent (incremental streaming updates)
+    fn convert_stream_event(&self, event: &StreamEvent, session_id: &str) -> Vec<SessionNotification> {
+        // StreamEvent.event is a serde_json::Value; parse based on type
         let event_type = event.event.get("type").and_then(|v| v.as_str());
 
         match event_type {
             Some("content_block_delta") => {
-                // 处理增量文本
+                // Handle delta text/thinking
                 if let Some(delta) = event.event.get("delta") {
                     if let Some(text) = delta.get("text").and_then(|v| v.as_str()) {
-                        return vec![self.make_agent_message_chunk_notification(
-                            session_id,
-                            text,
-                        )];
+                        return vec![self.make_agent_message_chunk_notification(session_id, text)];
                     }
                     if let Some(thinking) = delta.get("thinking").and_then(|v| v.as_str()) {
-                        return vec![self.make_agent_thought_chunk_notification(
-                            session_id,
-                            thinking,
-                        )];
+                        return vec![
+                            self.make_agent_thought_chunk_notification(session_id, thinking),
+                        ];
                     }
                 }
                 vec![]
             }
             Some("content_block_start") => {
-                // 可以用于检测 tool_use 开始
+                // Can be used to detect tool_use start
                 vec![]
             }
             _ => vec![],
         }
     }
 
-    // Helper 方法创建各类通知...
+    // Helper methods to build notifications...
     fn make_agent_message_notification(&self, session_id: &str, text: &str) -> SessionNotification {
         SessionNotification::Update(SessionUpdateNotification {
             session_id: session_id.to_string(),
@@ -1192,11 +1186,7 @@ impl NotificationConverter {
         })
     }
 
-    fn make_tool_call_notification(
-        &self,
-        session_id: &str,
-        tool_use: &ToolUseBlock,
-    ) -> SessionNotification {
+    fn make_tool_call_notification(&self, session_id: &str, tool_use: &ToolUseBlock) -> SessionNotification {
         let tool_info = self.extract_tool_info(&tool_use.name, &tool_use.input);
         SessionNotification::Update(SessionUpdateNotification {
             session_id: session_id.to_string(),
@@ -1209,17 +1199,10 @@ impl NotificationConverter {
         })
     }
 
-    fn make_tool_result_notification(
-        &self,
-        session_id: &str,
-        entry: &ToolUseEntry,
-        result: &ToolResultBlock,
-    ) -> SessionNotification {
+    fn make_tool_result_notification(&self, session_id: &str, entry: &ToolUseEntry, result: &ToolResultBlock) -> SessionNotification {
         let output = match &result.content {
             Some(ToolResultContent::Text(text)) => text.clone(),
-            Some(ToolResultContent::Blocks(blocks)) => {
-                serde_json::to_string(blocks).unwrap_or_default()
-            }
+            Some(ToolResultContent::Blocks(blocks)) => serde_json::to_string(blocks).unwrap_or_default(),
             None => String::new(),
         };
 
@@ -1237,7 +1220,7 @@ impl NotificationConverter {
         })
     }
 
-    /// 从工具名称和输入提取工具信息（用于 UI 展示）
+    /// Extract tool info (for UI) from tool name and input
     fn extract_tool_info(&self, name: &str, input: &serde_json::Value) -> Option<ToolInfo> {
         let (kind, title, locations) = match name {
             "Read" => {
@@ -1255,7 +1238,8 @@ impl NotificationConverter {
             "Bash" => {
                 let cmd = input.get("command").and_then(|v| v.as_str()).unwrap_or("");
                 let desc = input.get("description").and_then(|v| v.as_str());
-                let title = desc.map(|d| d.to_string())
+                let title = desc
+                    .map(|d| d.to_string())
                     .unwrap_or_else(|| format!("Run: {}", cmd.chars().take(50).collect::<String>()));
                 (ToolKind::Execute, title, None)
             }
@@ -1274,12 +1258,16 @@ impl NotificationConverter {
             title,
             kind,
             content: vec![],
-            locations: locations.map(|l| l.into_iter().map(|p| ToolCallLocation { path: p }).collect()),
+            locations: locations.map(|l| {
+                l.into_iter()
+                    .map(|p| ToolCallLocation { path: p })
+                    .collect()
+            }),
         })
     }
 }
 
-/// 工具使用缓存条目
+/// Tool use cache entry
 pub struct ToolUseEntry {
     pub tool_type: ToolUseType,
     pub id: String,
@@ -1294,25 +1282,25 @@ pub enum ToolUseType {
 }
 ```
 
-### 4.7 MCP Server 接口
+### 4.7 MCP Server interface
 
 ```rust
-/// 内置 MCP Server 工具
+/// Built-in MCP server tool
 pub trait McpTool: Send + Sync {
-    /// 工具名称
+    /// Tool name
     fn name(&self) -> &'static str;
 
-    /// 工具描述
+    /// Tool description
     fn description(&self) -> &'static str;
 
-    /// 输入 Schema
+    /// Input schema
     fn input_schema(&self) -> serde_json::Value;
 
-    /// 执行工具
+    /// Execute tool
     async fn execute(&self, input: serde_json::Value, context: ToolContext) -> Result<ToolResult>;
 }
 
-/// 工具执行上下文
+/// Tool execution context
 pub struct ToolContext {
     pub session_id: String,
     pub agent: Arc<ClaudeAcpAgent>,
@@ -1322,36 +1310,36 @@ pub struct ToolContext {
 
 ---
 
-## 5. 核心数据结构
+## 5. Core data structures
 
-### 5.1 ToolUse 缓存
+### 5.1 ToolUse cache
 
-工具使用缓存类型已在 Section 4.6 中定义，这里说明其并发存储方式：
+Tool use cache types are defined in Section 4.6; here we describe the concurrent storage approach:
 
 ```rust
-/// ToolUseEntry 和 ToolUseType 定义见 Section 4.6
+/// ToolUseEntry and ToolUseType are defined in Section 4.6
 
-/// 使用 DashMap 存储，支持并发访问
-/// 注意：使用 entry API 避免并发死锁
+/// Use DashMap for concurrent access
+/// Note: use the entry API to avoid deadlocks
 pub type ToolUseCache = DashMap<String, ToolUseEntry>;
 
 impl ToolUseCache {
-    /// 插入新的工具使用记录（推荐使用 entry API）
+    /// Insert a new tool use record (recommended: entry API)
     pub fn insert_tool_use(&self, entry: ToolUseEntry) {
         self.entry(entry.id.clone()).or_insert(entry);
     }
 
-    /// 获取并移除工具使用记录
+    /// Get and remove a tool use record
     pub fn take_tool_use(&self, id: &str) -> Option<ToolUseEntry> {
         self.remove(id).map(|(_, v)| v)
     }
 }
 ```
 
-### 5.2 后台终端状态
+### 5.2 Background terminal state
 
 ```rust
-/// 后台终端状态
+/// Background terminal state
 pub enum BackgroundTerminal {
     Started {
         handle: TerminalHandle,
@@ -1371,10 +1359,10 @@ pub enum TerminalFinishStatus {
 }
 ```
 
-### 5.3 工具信息
+### 5.3 Tool metadata
 
 ```rust
-/// 工具调用信息
+/// Tool call metadata
 pub struct ToolInfo {
     pub title: String,
     pub kind: ToolKind,
@@ -1382,7 +1370,7 @@ pub struct ToolInfo {
     pub locations: Option<Vec<ToolCallLocation>>,
 }
 
-/// 工具类型
+/// Tool kinds
 pub enum ToolKind {
     Read,
     Edit,
@@ -1397,9 +1385,9 @@ pub enum ToolKind {
 
 ---
 
-## 6. 消息转换流程
+## 6. Message conversion flow
 
-### 6.1 Prompt 转换 (ACP → Claude SDK)
+### 6.1 Prompt conversion (ACP → Claude SDK)
 
 ```mermaid
 graph LR
@@ -1410,11 +1398,11 @@ graph LR
         P4[Image]
     end
 
-    subgraph "转换逻辑"
-        T1[文本处理]
-        T2[URI格式化]
-        T3[Context包装]
-        T4[Image转换]
+    subgraph "Conversion logic"
+        T1[Text handling]
+        T2[URI formatting]
+        T3[Context wrapping]
+        T4[Image conversion]
     end
 
     subgraph "Claude SDK Message"
@@ -1430,7 +1418,7 @@ graph LR
     P4 --> T4 --> M4
 ```
 
-### 6.2 通知转换 (Claude SDK → ACP)
+### 6.2 Notification conversion (Claude SDK → ACP)
 
 ```mermaid
 graph LR
@@ -1456,12 +1444,12 @@ graph LR
 
 ---
 
-## 7. 错误处理设计
+## 7. Error handling design
 
-### 7.1 错误类型
+### 7.1 Error types
 
 ```rust
-/// Agent 错误类型
+/// Agent error types
 #[derive(Debug, thiserror::Error)]
 pub enum AgentError {
     #[error("Session not found: {0}")]
@@ -1489,12 +1477,14 @@ pub enum AgentError {
     Internal(String),
 }
 
-/// 转换为 ACP RequestError
+/// Convert to ACP RequestError
 impl From<AgentError> for sacp::RequestError {
     fn from(err: AgentError) -> Self {
         match err {
             AgentError::AuthRequired => RequestError::auth_required(),
-            AgentError::SessionNotFound(id) => RequestError::invalid_params(&format!("Session not found: {}", id)),
+            AgentError::SessionNotFound(id) => {
+                RequestError::invalid_params(&format!("Session not found: {}", id))
+            }
             _ => RequestError::internal_error(None, &err.to_string()),
         }
     }
@@ -1503,14 +1493,14 @@ impl From<AgentError> for sacp::RequestError {
 
 ---
 
-## 8. 并发设计
+## 8. Concurrency design
 
-### 8.1 会话并发管理
+### 8.1 Session concurrency
 
 ```mermaid
 graph TB
-    subgraph "并发模型"
-        SM[SessionManager<br/>DashMap]
+    subgraph "Concurrency model"
+        SM["SessionManager<br/>DashMap"]
 
         subgraph "Session 1"
             S1[Session State]
@@ -1537,18 +1527,18 @@ graph TB
     SN --> QN
 ```
 
-### 8.2 关键并发点
+### 8.2 Key concurrency points
 
-1. **SessionManager**: 使用 `DashMap<String, Arc<Session>>` 管理会话
-2. **ToolUseCache**: 使用 `DashMap<String, ToolUseEntry>` 缓存工具调用
-3. **Session.cancelled**: 使用 `AtomicBool` 标记取消状态
-4. **Session.permission_mode**: 使用 `RwLock<PermissionMode>` 保护模式切换
+1. **SessionManager**: use `DashMap<String, Arc<Session>>` to manage sessions
+2. **ToolUseCache**: use `DashMap<String, ToolUseEntry>` to cache tool calls
+3. **Session.cancelled**: use `AtomicBool` to mark cancellation
+4. **Session.permission_mode**: use `RwLock<PermissionMode>` to protect mode switching
 
 ---
 
-## 9. 依赖设计
+## 9. Dependency design
 
-### 9.1 Cargo.toml (单一 Crate)
+### 9.1 Cargo.toml (single crate)
 
 ```toml
 [package]
@@ -1580,7 +1570,7 @@ sacp-tokio = { path = "vendors/acp-rust-sdk/src/sacp-tokio" }
 claude-agent-sdk-rs = { path = "vendors/claude-agent-sdk-rs" }
 
 # MCP Protocol
-rmcp = "0.1"  # 使用最新版本的 rmcp
+rmcp = "0.1"  # use the latest rmcp
 
 # Async Runtime
 tokio = { version = "1", features = ["full"] }
@@ -1608,54 +1598,54 @@ tokio-test = "0.4"
 tempfile = "3"
 ```
 
-### 9.2 Feature Flags (可选)
+### 9.2 Feature flags (optional)
 
 ```toml
 [features]
 default = ["mcp"]
-# 启用内置 MCP Server
+# Enable built-in MCP server
 mcp = ["rmcp"]
-# 启用完整日志
+# Enable verbose JSON logging
 full-logging = ["tracing-subscriber/json"]
 ```
 
-### 9.3 发布到 crates.io
+### 9.3 Publishing to crates.io
 
-发布前检查清单：
+Pre-publish checklist:
 
-1. **更新版本号**: `Cargo.toml` 中的 `version`
-2. **更新 CHANGELOG**: 记录变更
-3. **确保文档完整**: `README.md`, rustdoc
-4. **运行测试**: `cargo test`
-5. **检查 lint**: `cargo clippy`
-6. **dry-run 发布**: `cargo publish --dry-run`
-7. **正式发布**: `cargo publish`
+1. **Bump version**: `version` in `Cargo.toml`
+2. **Update CHANGELOG**: record changes
+3. **Ensure docs are complete**: `README.md`, rustdoc
+4. **Run tests**: `cargo test`
+5. **Run lint**: `cargo clippy`
+6. **Dry-run publish**: `cargo publish --dry-run`
+7. **Publish**: `cargo publish`
 
-注意：vendors 目录下的依赖在发布时需要使用 crates.io 版本或 git 依赖：
+Note: dependencies under `vendors/` must be replaced with crates.io or git dependencies when publishing:
 
 ```toml
-# 发布版本的依赖配置
+# Published dependency configuration
 [dependencies]
-sacp = "0.1"  # 发布到 crates.io 后使用版本号
+sacp = "0.1"  # use a version after publishing to crates.io
 claude-agent-sdk-rs = { git = "https://github.com/soddygo/claude-agent-sdk-rs.git", tag = "v0.1.0" }
 ```
 
 ---
 
-## 10. 启动流程
+## 10. Startup flow
 
-### 10.1 CLI 入口 (src/main.rs)
+### 10.1 CLI entry (src/main.rs)
 
 ```rust
-//! Claude Code ACP Agent CLI 入口
+//! Claude Code ACP Agent CLI entry
 //!
-//! 这是一个简单的入口文件，委托给 acp-agent crate 处理
+//! This is a thin entrypoint that delegates to the acp-agent crate.
 
 use acp_agent::run_acp;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    // 初始化日志
+    // Initialize logging
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::from_default_env()
@@ -1663,12 +1653,12 @@ async fn main() -> anyhow::Result<()> {
         )
         .init();
 
-    // 启动 ACP Agent
+    // Start ACP agent
     run_acp().await
 }
 ```
 
-### 10.2 Agent 运行器 (crates/acp-agent/src/runner.rs)
+### 10.2 Agent runner (crates/acp-agent/src/runner.rs)
 
 ```rust
 use acp_types::AgentConfig;
@@ -1677,12 +1667,12 @@ use std::io::{stdin, stdout};
 
 use crate::agent::ClaudeAcpAgent;
 
-/// 启动 ACP Agent，通过 stdin/stdout 提供服务
+/// Start the ACP agent over stdin/stdout
 pub async fn run_acp() -> anyhow::Result<()> {
-    // 从环境变量加载配置
+    // Load config from environment variables
     let config = AgentConfig::from_env();
 
-    // 创建 Agent
+    // Create agent
     let agent = ClaudeAcpAgent::new(config);
 
     JrHandlerChain::new()
@@ -1699,7 +1689,7 @@ pub async fn run_acp() -> anyhow::Result<()> {
             let response = agent.prompt(req).await?;
             cx.respond(response)
         })
-        // ... 其他处理器
+        // ... other handlers
         .serve(ByteStreams::new(stdout(), stdin()))
         .await?;
 
@@ -1707,77 +1697,77 @@ pub async fn run_acp() -> anyhow::Result<()> {
 }
 ```
 
-### 10.3 服务启动流程
+### 10.3 Service bootstrap diagram
 
 ```mermaid
 graph TB
-    A[main] --> B[初始化日志]
-    B --> C[创建 ClaudeAcpAgent]
-    C --> D[创建 ByteStreams<br/>stdin/stdout]
-    D --> E[构建 JrHandlerChain]
-    E --> F[注册请求处理器]
+    A[main] --> B[init logging]
+    B --> C[create ClaudeAcpAgent]
+    C --> D[create ByteStreams<br/>stdin/stdout]
+    D --> E[build JrHandlerChain]
+    E --> F[register request handlers]
     F --> G[serve]
-    G --> H[等待连接]
+    G --> H[wait for connection]
 ```
 
 ---
 
-## 11. 测试策略
+## 11. Testing strategy
 
-### 11.1 单元测试
+### 11.1 Unit tests
 
-- 消息转换测试 (Prompt 转换、通知转换)
-- 权限检查测试
-- 工具信息提取测试
+- Message conversion tests (prompt conversion, notification conversion)
+- Permission checks
+- Tool metadata extraction
 
-### 11.2 集成测试
+### 11.2 Integration tests
 
-- ACP 协议交互测试
-- Claude SDK 集成测试
-- MCP Server 工具测试
+- ACP protocol interaction tests
+- Claude SDK integration tests
+- MCP server tool tests
 
-### 11.3 E2E 测试
+### 11.3 E2E tests
 
-- 完整会话流程测试
-- 多会话并发测试
-- 错误恢复测试
-
----
-
-## 12. 后续扩展
-
-### 12.1 Phase 1 - MVP (基础搭建)
-
-- [ ] 创建项目结构和所有模块骨架
-- [ ] 实现 `types/` 公共类型（含 AgentConfig、TokenUsage、NewSessionMeta）
-- [ ] 实现环境变量配置加载
-- [ ] 实现 Meta 字段解析（systemPrompt、resume session_id）
-- [ ] 实现基础 ACP 协议支持 (initialize, new_session, prompt, cancel)
-- [ ] Claude SDK 集成
-- [ ] 基本通知转换 (`converter/`)
-
-### 12.2 Phase 2 - 功能完善
-
-- [ ] `mcp/` MCP Server 工具实现（使用 rmcp）
-- [ ] `session/` 权限系统完善
-- [ ] `session/` Token 用量统计
-- [ ] 会话 Fork/Resume 支持（使用 meta.claudeCode.options.resume）
-- [ ] `settings/` 设置管理实现
-
-### 12.3 Phase 3 - 优化与发布
-
-- [ ] 性能优化
-- [ ] 更完善的错误处理
-- [ ] 日志和监控
-- [ ] 单元测试和集成测试
-- [ ] rustdoc 文档完善
-- [ ] 发布到 crates.io
+- Full session flow tests
+- Multi-session concurrency tests
+- Error recovery tests
 
 ---
 
-## 13. 附录
+## 12. Future work
 
-### 13.1 ACP 协议方法映射
+### 12.1 Phase 1 - MVP (scaffolding)
+
+- [ ] Create project structure and module skeletons
+- [ ] Implement shared types in `types/` (AgentConfig, TokenUsage, NewSessionMeta)
+- [ ] Implement environment variable configuration loading
+- [ ] Implement meta parsing (systemPrompt, resume session_id)
+- [ ] Implement basic ACP support (initialize, new_session, prompt, cancel)
+- [ ] Claude SDK integration
+- [ ] Basic notification conversion (`converter/`)
+
+### 12.2 Phase 2 - Feature completeness
+
+- [ ] Implement `mcp/` tools (using rmcp)
+- [ ] Improve `session/` permission system
+- [ ] Implement `session/` token usage accounting
+- [ ] Fork/Resume session support (via meta.claudeCode.options.resume)
+- [ ] Implement `settings/` management
+
+### 12.3 Phase 3 - Optimization and release
+
+- [ ] Performance optimizations
+- [ ] More robust error handling
+- [ ] Logging and monitoring
+- [ ] Unit and integration tests
+- [ ] Improve rustdoc documentation
+- [ ] Publish to crates.io
+
+---
+
+## 13. Appendix
+
+### 13.1 ACP method mapping
 
 | ACP Method | Handler | Claude SDK API |
 |------------|---------|----------------|
@@ -1787,7 +1777,7 @@ graph TB
 | `session/cancel` | CancelHandler | `Query.interrupt()` |
 | `session/set_mode` | SetModeHandler | `Query.setPermissionMode()` |
 
-### 13.2 工具名称映射
+### 13.2 Tool name mapping
 
 | ACP Tool Name | Claude Tool Name |
 |---------------|------------------|
